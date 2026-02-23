@@ -6,7 +6,11 @@ use crate::app::Message;
 use crate::core::models::MessageSummary;
 
 /// Render the message list for the selected folder.
-pub fn view<'a>(messages: &'a [MessageSummary], selected: Option<usize>) -> Element<'a, Message> {
+pub fn view<'a>(
+    messages: &'a [MessageSummary],
+    selected: Option<usize>,
+    has_more: bool,
+) -> Element<'a, Message> {
     let mut col = widget::column().spacing(2).padding(8);
 
     if messages.is_empty() {
@@ -25,6 +29,14 @@ pub fn view<'a>(messages: &'a [MessageSummary], selected: Option<usize>) -> Elem
                 .width(Length::Fill);
 
             col = col.push(btn);
+        }
+
+        if has_more {
+            let load_more_btn = widget::button::text("Load more messages")
+                .on_press(Message::LoadMoreMessages)
+                .width(Length::Fill);
+            col = col.push(widget::vertical_space().height(4));
+            col = col.push(load_more_btn);
         }
     }
 

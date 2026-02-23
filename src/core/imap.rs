@@ -172,6 +172,7 @@ impl ImapSession {
                     has_attachments: envelope.has_attachments,
                     thread_id: None,
                     envelope_hash: envelope.hash().0,
+                    timestamp: envelope.timestamp as i64,
                 });
             }
         }
