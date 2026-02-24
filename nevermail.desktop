@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Nevermail
+Comment=COSMIC desktop email client
+Exec=nevermail
+Icon=nevermail
+Terminal=false
+Type=Application
+Categories=Network;Email;
+Keywords=email;mail;imap;
+StartupWMClass=com.cosmic_utils.email
