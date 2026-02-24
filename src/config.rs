@@ -12,6 +12,7 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub use_starttls: bool,
+    pub email_addresses: Vec<String>,
 }
 
 /// On-disk representation. Password is either a keyring reference or plaintext.
@@ -22,6 +23,8 @@ pub struct FileConfig {
     pub username: String,
     pub starttls: bool,
     pub password: PasswordBackend,
+    #[serde(default)]
+    pub email_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +34,34 @@ pub enum PasswordBackend {
     Keyring,
     #[serde(rename = "plaintext")]
     Plaintext { value: String },
+}
+
+/// SMTP configuration derived from IMAP config + optional env overrides.
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    pub server: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub use_starttls: bool,
+}
+
+impl SmtpConfig {
+    pub fn from_imap_config(config: &Config) -> Self {
+        let server = std::env::var("NEVERMAIL_SMTP_SERVER")
+            .unwrap_or_else(|_| config.imap_server.clone());
+        let port = std::env::var("NEVERMAIL_SMTP_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(587);
+        SmtpConfig {
+            server,
+            port,
+            username: config.username.clone(),
+            password: config.password.clone(),
+            use_starttls: true,
+        }
+    }
 }
 
 /// What the dialog needs to show when credentials can't be resolved automatically.
@@ -89,6 +120,10 @@ impl Config {
         let use_starttls = std::env::var("NEVERMAIL_STARTTLS")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let email_addresses = std::env::var("NEVERMAIL_FROM")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
 
         Some(Config {
             imap_server,
@@ -96,6 +131,7 @@ impl Config {
             username,
             password,
             use_starttls,
+            email_addresses,
         })
     }
 
@@ -107,6 +143,7 @@ impl Config {
             username: fc.username.clone(),
             password,
             use_starttls: fc.starttls,
+            email_addresses: fc.email_addresses.clone(),
         }
     }
 

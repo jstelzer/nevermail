@@ -23,6 +23,8 @@ pub fn view<'a>(body: &'a str, selected: Option<(usize, &MessageSummary)>) -> El
 
         let toolbar = widget::row()
             .spacing(8)
+            .push(widget::button::text("Reply").on_press(Message::ComposeReply))
+            .push(widget::button::text("Forward").on_press(Message::ComposeForward))
             .push(widget::button::text(star_label).on_press(Message::ToggleStar(index)))
             .push(widget::button::text(read_label).on_press(Message::ToggleRead(index)))
             .push(widget::button::text("Archive").on_press(Message::ArchiveMessage(index)))

@@ -9,6 +9,13 @@ use crate::core::models::Folder;
 pub fn view<'a>(folders: &[Folder], selected: Option<usize>) -> Element<'a, Message> {
     let mut col = widget::column().spacing(4).padding(8);
 
+    col = col.push(
+        widget::button::suggested("Compose")
+            .on_press(Message::ComposeNew)
+            .width(Length::Fill),
+    );
+    col = col.push(widget::vertical_space().height(8));
+
     if folders.is_empty() {
         col = col.push(widget::text::body("No folders"));
     } else {

@@ -5,16 +5,19 @@ use cosmic::app::{Core, Task};
 use cosmic::iced::keyboard;
 use cosmic::iced::{Event, Length, Subscription};
 use cosmic::widget;
+use cosmic::widget::text_editor;
 use cosmic::Element;
 
 use melib::backends::FlagOp;
 use melib::email::Flag;
 use melib::{EnvelopeHash, MailboxHash};
 
-use crate::config::{Config, ConfigNeedsInput, FileConfig, PasswordBackend};
+use crate::config::{Config, ConfigNeedsInput, FileConfig, PasswordBackend, SmtpConfig};
 use crate::core::imap::ImapSession;
 use crate::core::models::{Folder, MessageSummary};
+use crate::core::smtp::{self, OutgoingEmail};
 use crate::core::store::{self, CacheHandle, DEFAULT_PAGE_SIZE};
+use crate::ui::compose_dialog::ComposeMode;
 
 const APP_ID: &str = "com.cosmic_utils.email";
 
@@ -48,6 +51,18 @@ pub struct AppModel {
     is_syncing: bool,
     status_message: String,
 
+    // Compose dialog state
+    show_compose_dialog: bool,
+    compose_mode: ComposeMode,
+    compose_from: usize,
+    compose_to: String,
+    compose_subject: String,
+    compose_body: text_editor::Content,
+    compose_in_reply_to: Option<String>,
+    compose_references: Option<String>,
+    compose_error: Option<String>,
+    is_sending: bool,
+
     // Setup dialog state
     show_setup_dialog: bool,
     password_only_mode: bool,
@@ -57,6 +72,7 @@ pub struct AppModel {
     setup_password: String,
     setup_starttls: bool,
     setup_password_visible: bool,
+    setup_email_addresses: String,
     setup_error: Option<String>,
 }
 
@@ -99,6 +115,18 @@ pub enum Message {
     ActivateSelection,
     ToggleThreadCollapse,
 
+    // Compose messages
+    ComposeNew,
+    ComposeReply,
+    ComposeForward,
+    ComposeFromChanged(usize),
+    ComposeToChanged(String),
+    ComposeSubjectChanged(String),
+    ComposeBodyAction(text_editor::Action),
+    ComposeSend,
+    ComposeCancel,
+    SendComplete(Result<(), String>),
+
     OpenLink(String),
     Refresh,
     Noop,
@@ -110,6 +138,7 @@ pub enum Message {
     SetupPasswordChanged(String),
     SetupStarttlsToggled(bool),
     SetupPasswordVisibilityToggled,
+    SetupEmailAddressesChanged(String),
     SetupSubmit,
     SetupCancel,
 }
@@ -161,6 +190,17 @@ impl cosmic::Application for AppModel {
             is_syncing: false,
             status_message: "Starting up...".into(),
 
+            show_compose_dialog: false,
+            compose_mode: ComposeMode::New,
+            compose_from: 0,
+            compose_to: String::new(),
+            compose_subject: String::new(),
+            compose_body: text_editor::Content::new(),
+            compose_in_reply_to: None,
+            compose_references: None,
+            compose_error: None,
+            is_sending: false,
+
             show_setup_dialog: false,
             password_only_mode: false,
             setup_server: String::new(),
@@ -169,6 +209,7 @@ impl cosmic::Application for AppModel {
             setup_password: String::new(),
             setup_starttls: false,
             setup_password_visible: false,
+            setup_email_addresses: String::new(),
             setup_error: None,
         };
 
@@ -218,68 +259,27 @@ impl cosmic::Application for AppModel {
     }
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
-        if !self.show_setup_dialog {
-            return None;
+        if self.show_setup_dialog {
+            return Some(self.setup_dialog());
         }
-
-        let mut controls = widget::column().spacing(12);
-
-        if !self.password_only_mode {
-            controls = controls
-                .push(
-                    widget::text_input("mail.example.com", &self.setup_server)
-                        .label("IMAP Server")
-                        .on_input(Message::SetupServerChanged),
-                )
-                .push(
-                    widget::text_input("993", &self.setup_port)
-                        .label("Port")
-                        .on_input(Message::SetupPortChanged),
-                )
-                .push(
-                    widget::text_input("you@example.com", &self.setup_username)
-                        .label("Username")
-                        .on_input(Message::SetupUsernameChanged),
-                );
+        if self.show_compose_dialog {
+            let addrs = self
+                .config
+                .as_ref()
+                .map(|c| c.email_addresses.as_slice())
+                .unwrap_or(&[]);
+            return Some(crate::ui::compose_dialog::view(
+                &self.compose_mode,
+                addrs,
+                self.compose_from,
+                &self.compose_to,
+                &self.compose_subject,
+                &self.compose_body,
+                self.compose_error.as_deref(),
+                self.is_sending,
+            ));
         }
-
-        controls = controls.push(
-            widget::text_input::secure_input(
-                "Password",
-                &self.setup_password,
-                Some(Message::SetupPasswordVisibilityToggled),
-                !self.setup_password_visible,
-            )
-            .label("Password")
-            .on_input(Message::SetupPasswordChanged),
-        );
-
-        if !self.password_only_mode {
-            controls = controls.push(
-                widget::settings::item::builder("Use STARTTLS")
-                    .toggler(self.setup_starttls, Message::SetupStarttlsToggled),
-            );
-        }
-
-        let mut dialog = widget::dialog()
-            .title(if self.password_only_mode {
-                "Enter Password"
-            } else {
-                "Account Setup"
-            })
-            .control(controls)
-            .primary_action(
-                widget::button::suggested("Connect").on_press(Message::SetupSubmit),
-            )
-            .secondary_action(
-                widget::button::standard("Cancel").on_press(Message::SetupCancel),
-            );
-
-        if let Some(ref err) = self.setup_error {
-            dialog = dialog.body(err.as_str());
-        }
-
-        Some(dialog.into())
+        None
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -312,6 +312,24 @@ impl cosmic::Application for AppModel {
                     }
                     keyboard::Key::Character(ref c) if c.as_str() == " " => {
                         Some(Message::ToggleThreadCollapse)
+                    }
+                    keyboard::Key::Character(ref c)
+                        if c.as_str() == "c" && !modifiers.control() =>
+                    {
+                        Some(Message::ComposeNew)
+                    }
+                    keyboard::Key::Character(ref c)
+                        if c.as_str() == "r" && !modifiers.control() =>
+                    {
+                        Some(Message::ComposeReply)
+                    }
+                    keyboard::Key::Character(ref c)
+                        if c.as_str() == "f" && !modifiers.control() =>
+                    {
+                        Some(Message::ComposeForward)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                        Some(Message::ComposeCancel)
                     }
                     _ => None,
                 },
@@ -367,6 +385,173 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
             // -----------------------------------------------------------------
+            // Compose dialog handlers
+            // -----------------------------------------------------------------
+            Message::ComposeNew => {
+                if self.show_setup_dialog || self.show_compose_dialog {
+                    return Task::none();
+                }
+                self.compose_mode = ComposeMode::New;
+                self.compose_from = 0;
+                self.compose_to.clear();
+                self.compose_subject.clear();
+                self.compose_body = text_editor::Content::new();
+                self.compose_in_reply_to = None;
+                self.compose_references = None;
+                self.compose_error = None;
+                self.is_sending = false;
+                self.show_compose_dialog = true;
+            }
+
+            Message::ComposeReply => {
+                if self.show_setup_dialog || self.show_compose_dialog {
+                    return Task::none();
+                }
+                if let Some(index) = self.selected_message {
+                    if let Some(msg) = self.messages.get(index) {
+                        self.compose_mode = ComposeMode::Reply;
+                        self.compose_to = msg.from.clone();
+
+                        let subj = &msg.subject;
+                        self.compose_subject = if subj.starts_with("Re: ") {
+                            subj.clone()
+                        } else {
+                            format!("Re: {subj}")
+                        };
+
+                        let quoted = quote_body(&self.preview_body, &msg.from, &msg.date);
+                        self.compose_body = text_editor::Content::with_text(&format!("\n\n{quoted}"));
+
+                        self.compose_in_reply_to = Some(msg.message_id.clone());
+                        self.compose_references = Some(build_references(
+                            msg.in_reply_to.as_deref(),
+                            &msg.message_id,
+                        ));
+                        self.compose_error = None;
+                        self.is_sending = false;
+                        self.show_compose_dialog = true;
+                    }
+                }
+            }
+
+            Message::ComposeForward => {
+                if self.show_setup_dialog || self.show_compose_dialog {
+                    return Task::none();
+                }
+                if let Some(index) = self.selected_message {
+                    if let Some(msg) = self.messages.get(index) {
+                        self.compose_mode = ComposeMode::Forward;
+                        self.compose_to.clear();
+
+                        let subj = &msg.subject;
+                        self.compose_subject = if subj.starts_with("Fwd: ") {
+                            subj.clone()
+                        } else {
+                            format!("Fwd: {subj}")
+                        };
+
+                        let fwd = forward_body(
+                            &self.preview_body,
+                            &msg.from,
+                            &msg.date,
+                            &msg.subject,
+                        );
+                        self.compose_body = text_editor::Content::with_text(&format!("\n\n{fwd}"));
+
+                        self.compose_in_reply_to = None;
+                        self.compose_references = None;
+                        self.compose_error = None;
+                        self.is_sending = false;
+                        self.show_compose_dialog = true;
+                    }
+                }
+            }
+
+            Message::ComposeFromChanged(i) => {
+                self.compose_from = i;
+            }
+            Message::ComposeToChanged(v) => {
+                self.compose_to = v;
+            }
+            Message::ComposeSubjectChanged(v) => {
+                self.compose_subject = v;
+            }
+            Message::ComposeBodyAction(action) => {
+                self.compose_body.perform(action);
+            }
+
+            Message::ComposeSend => {
+                if self.compose_to.trim().is_empty() {
+                    self.compose_error = Some("Recipient is required".into());
+                    return Task::none();
+                }
+
+                let body_text = self.compose_body.text();
+                if body_text.trim().is_empty() {
+                    self.compose_error = Some("Message body is required".into());
+                    return Task::none();
+                }
+
+                let Some(ref config) = self.config else {
+                    self.compose_error = Some("Not configured".into());
+                    return Task::none();
+                };
+
+                let from_addr = config
+                    .email_addresses
+                    .get(self.compose_from)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        config.email_addresses.first().cloned().unwrap_or_default()
+                    });
+                if from_addr.is_empty() {
+                    self.compose_error = Some(
+                        "No email address configured. Re-run setup to add one.".into(),
+                    );
+                    return Task::none();
+                }
+
+                self.is_sending = true;
+                self.compose_error = None;
+
+                let smtp_config = SmtpConfig::from_imap_config(config);
+                let email = OutgoingEmail {
+                    from: from_addr,
+                    to: self.compose_to.clone(),
+                    subject: self.compose_subject.clone(),
+                    body: body_text,
+                    in_reply_to: self.compose_in_reply_to.clone(),
+                    references: self.compose_references.clone(),
+                };
+
+                return cosmic::task::future(async move {
+                    Message::SendComplete(smtp::send_email(&smtp_config, &email).await)
+                });
+            }
+
+            Message::ComposeCancel => {
+                self.show_compose_dialog = false;
+                self.is_sending = false;
+            }
+
+            Message::SendComplete(Ok(())) => {
+                self.show_compose_dialog = false;
+                self.is_sending = false;
+                self.compose_to.clear();
+                self.compose_subject.clear();
+                self.compose_body = text_editor::Content::new();
+                self.compose_in_reply_to = None;
+                self.compose_references = None;
+                self.compose_error = None;
+                self.status_message = "Message sent".into();
+            }
+
+            Message::SendComplete(Err(e)) => {
+                self.is_sending = false;
+                self.compose_error = Some(format!("Send failed: {e}"));
+            }
+
+            // -----------------------------------------------------------------
             // Setup dialog input handlers
             // -----------------------------------------------------------------
             Message::SetupServerChanged(v) => {
@@ -386,6 +571,9 @@ impl cosmic::Application for AppModel {
             }
             Message::SetupPasswordVisibilityToggled => {
                 self.setup_password_visible = !self.setup_password_visible;
+            }
+            Message::SetupEmailAddressesChanged(v) => {
+                self.setup_email_addresses = v;
             }
 
             // -----------------------------------------------------------------
@@ -407,6 +595,18 @@ impl cosmic::Application for AppModel {
                         return Task::none();
                     }
                 };
+
+                let email_addresses: Vec<String> = self
+                    .setup_email_addresses
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !self.password_only_mode && email_addresses.is_empty() {
+                    self.setup_error =
+                        Some("At least one email address is required for sending".into());
+                    return Task::none();
+                }
 
                 let server = self.setup_server.trim().to_string();
                 let username = self.setup_username.trim().to_string();
@@ -435,6 +635,7 @@ impl cosmic::Application for AppModel {
                     username: username.clone(),
                     starttls,
                     password: password_backend,
+                    email_addresses: email_addresses.clone(),
                 };
                 if let Err(e) = fc.save() {
                     log::error!("Failed to save config: {}", e);
@@ -449,6 +650,7 @@ impl cosmic::Application for AppModel {
                     username,
                     password,
                     use_starttls: starttls,
+                    email_addresses,
                 };
 
                 self.config = Some(config.clone());
@@ -1239,6 +1441,73 @@ impl AppModel {
         self.core.set_title(self.core.main_window_id(), title)
     }
 
+    fn setup_dialog(&self) -> Element<'_, Message> {
+        let mut controls = widget::column().spacing(12);
+
+        if !self.password_only_mode {
+            controls = controls
+                .push(
+                    widget::text_input("mail.example.com", &self.setup_server)
+                        .label("IMAP Server")
+                        .on_input(Message::SetupServerChanged),
+                )
+                .push(
+                    widget::text_input("993", &self.setup_port)
+                        .label("Port")
+                        .on_input(Message::SetupPortChanged),
+                )
+                .push(
+                    widget::text_input("you@example.com", &self.setup_username)
+                        .label("Username")
+                        .on_input(Message::SetupUsernameChanged),
+                );
+        }
+
+        controls = controls.push(
+            widget::text_input::secure_input(
+                "Password",
+                &self.setup_password,
+                Some(Message::SetupPasswordVisibilityToggled),
+                !self.setup_password_visible,
+            )
+            .label("Password")
+            .on_input(Message::SetupPasswordChanged),
+        );
+
+        if !self.password_only_mode {
+            controls = controls
+                .push(
+                    widget::text_input("you@example.com, alias@example.com", &self.setup_email_addresses)
+                        .label("Email addresses (comma-separated)")
+                        .on_input(Message::SetupEmailAddressesChanged),
+                )
+                .push(
+                    widget::settings::item::builder("Use STARTTLS")
+                        .toggler(self.setup_starttls, Message::SetupStarttlsToggled),
+                );
+        }
+
+        let mut dialog = widget::dialog()
+            .title(if self.password_only_mode {
+                "Enter Password"
+            } else {
+                "Account Setup"
+            })
+            .control(controls)
+            .primary_action(
+                widget::button::suggested("Connect").on_press(Message::SetupSubmit),
+            )
+            .secondary_action(
+                widget::button::standard("Cancel").on_press(Message::SetupCancel),
+            );
+
+        if let Some(ref err) = self.setup_error {
+            dialog = dialog.body(err.as_str());
+        }
+
+        dialog.into()
+    }
+
     /// Rebuild `visible_indices` and `thread_sizes` based on current messages
     /// and collapsed state.
     fn recompute_visible(&mut self) {
@@ -1270,5 +1539,31 @@ impl AppModel {
         for f in &self.folders {
             self.folder_map.insert(f.path.clone(), f.mailbox_hash);
         }
+    }
+}
+
+fn quote_body(body: &str, from: &str, date: &str) -> String {
+    let mut out = format!("On {date}, {from} wrote:\n");
+    for line in body.lines() {
+        out.push_str("> ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn forward_body(body: &str, from: &str, date: &str, subject: &str) -> String {
+    let mut out = String::from("---------- Forwarded message ----------\n");
+    out.push_str(&format!("From: {from}\n"));
+    out.push_str(&format!("Date: {date}\n"));
+    out.push_str(&format!("Subject: {subject}\n\n"));
+    out.push_str(body);
+    out
+}
+
+fn build_references(in_reply_to: Option<&str>, message_id: &str) -> String {
+    match in_reply_to {
+        Some(irt) => format!("{irt} {message_id}"),
+        None => message_id.to_string(),
     }
 }
