@@ -6,7 +6,7 @@ use cosmic::app::{Core, Task};
 use cosmic::iced::keyboard;
 use cosmic::iced::{Event, Length, Subscription};
 use cosmic::widget;
-use cosmic::widget::{image, text_editor};
+use cosmic::widget::{image, markdown, text_editor};
 use cosmic::Element;
 
 use futures::{SinkExt, StreamExt};
@@ -39,7 +39,7 @@ pub struct AppModel {
     has_more_messages: bool,
 
     preview_body: String,
-    preview_content: text_editor::Content,
+    preview_markdown: Vec<markdown::Item>,
     preview_attachments: Vec<AttachmentData>,
     preview_image_handles: Vec<Option<image::Handle>>,
 
@@ -96,8 +96,9 @@ pub enum Message {
     SelectMessage(usize),
     MessagesLoaded(Result<Vec<MessageSummary>, String>),
 
-    BodyLoaded(Result<(String, Vec<AttachmentData>), String>),
-    PreviewAction(text_editor::Action),
+    BodyLoaded(Result<(String, String, Vec<AttachmentData>), String>),
+    LinkClicked(markdown::Url),
+    CopyBody,
 
     SaveAttachment(usize),
     SaveAttachmentComplete(Result<String, String>),
@@ -230,7 +231,7 @@ impl cosmic::Application for AppModel {
             messages_offset: 0,
             has_more_messages: false,
             preview_body: String::new(),
-            preview_content: text_editor::Content::new(),
+            preview_markdown: Vec::new(),
             preview_attachments: Vec::new(),
             preview_image_handles: Vec::new(),
             folder_map: HashMap::new(),
@@ -445,7 +446,7 @@ impl cosmic::Application for AppModel {
             self.messages.get(i).map(|msg| (i, msg))
         });
         let message_view = crate::ui::message_view::view(
-            &self.preview_content,
+            &self.preview_markdown,
             selected_msg,
             &self.preview_attachments,
             &self.preview_image_handles,
@@ -1006,7 +1007,7 @@ impl cosmic::Application for AppModel {
                 self.messages.clear();
                 self.selected_message = None;
                 self.preview_body.clear();
-                self.preview_content = text_editor::Content::new();
+                self.preview_markdown.clear();
                 self.preview_attachments.clear();
                 self.preview_image_handles.clear();
                 self.messages_offset = 0;
@@ -1107,10 +1108,10 @@ impl cosmic::Application for AppModel {
                         self.status_message = "Loading message...".into();
                         return cosmic::task::future(async move {
                             // Unified cache-first: try cache (includes attachments)
-                            if let Ok(Some((body, attachments))) =
+                            if let Ok(Some((md_body, plain_body, attachments))) =
                                 cache.load_body(envelope_hash).await
                             {
-                                return Message::BodyLoaded(Ok((body, attachments)));
+                                return Message::BodyLoaded(Ok((md_body, plain_body, attachments)));
                             }
 
                             // Cache miss: fetch from IMAP, save to cache
@@ -1118,11 +1119,12 @@ impl cosmic::Application for AppModel {
                                 let result = session
                                     .fetch_body(EnvelopeHash(envelope_hash))
                                     .await;
-                                if let Ok((ref body, ref attachments)) = result {
+                                if let Ok((ref md_body, ref plain_body, ref attachments)) = result {
                                     if let Err(e) = cache
                                         .save_body(
                                             envelope_hash,
-                                            body.clone(),
+                                            md_body.clone(),
+                                            plain_body.clone(),
                                             attachments.clone(),
                                         )
                                         .await
@@ -1152,9 +1154,30 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::BodyLoaded(Ok((body, attachments))) => {
-                self.preview_content = text_editor::Content::with_text(&body);
-                self.preview_body = body;
+            Message::BodyLoaded(Ok((markdown_body, plain_body, attachments))) => {
+                // Safety net: if clean_email_html still produces too many items
+                // (the markdown widget has no virtualization), fall back to plain text.
+                const MAX_MD_ITEMS: usize = 200;
+
+                let items: Vec<markdown::Item> = markdown::parse(&markdown_body).collect();
+                log::debug!(
+                    "Markdown: {} bytes input, {} items parsed",
+                    markdown_body.len(),
+                    items.len()
+                );
+
+                if items.len() <= MAX_MD_ITEMS {
+                    self.preview_markdown = items;
+                } else {
+                    log::warn!(
+                        "Markdown items ({}) exceed cap ({}), falling back to plain text",
+                        items.len(),
+                        MAX_MD_ITEMS
+                    );
+                    // Plain text through markdown::parse produces ~1 item per paragraph
+                    self.preview_markdown = markdown::parse(&plain_body).collect();
+                }
+                self.preview_body = plain_body;
                 self.preview_image_handles = attachments
                     .iter()
                     .map(|a| {
@@ -1170,15 +1193,19 @@ impl cosmic::Application for AppModel {
             }
             Message::BodyLoaded(Err(e)) => {
                 let msg = format!("Failed to load message body: {}", e);
-                self.preview_content = text_editor::Content::with_text(&msg);
+                self.preview_markdown = markdown::parse(&msg).collect();
                 self.preview_body = msg;
                 self.status_message = "Error loading message".into();
                 log::error!("Body fetch failed: {}", e);
             }
 
-            Message::PreviewAction(action) => {
-                if !matches!(action, text_editor::Action::Edit(_)) {
-                    self.preview_content.perform(action);
+            Message::LinkClicked(url) => {
+                crate::core::mime::open_link(url.as_str());
+            }
+
+            Message::CopyBody => {
+                if !self.preview_body.is_empty() {
+                    return cosmic::iced::clipboard::write(self.preview_body.clone());
                 }
             }
 
@@ -1327,7 +1354,7 @@ impl cosmic::Application for AppModel {
                             } else if self.messages.is_empty() {
                                 self.selected_message = None;
                                 self.preview_body.clear();
-                                self.preview_content = text_editor::Content::new();
+                                self.preview_markdown.clear();
                                 self.preview_attachments.clear();
                                 self.preview_image_handles.clear();
                             }
@@ -1387,7 +1414,7 @@ impl cosmic::Application for AppModel {
                             } else if self.messages.is_empty() {
                                 self.selected_message = None;
                                 self.preview_body.clear();
-                                self.preview_content = text_editor::Content::new();
+                                self.preview_markdown.clear();
                                 self.preview_attachments.clear();
                                 self.preview_image_handles.clear();
                             }
@@ -1606,7 +1633,7 @@ impl cosmic::Application for AppModel {
                 self.messages = results;
                 self.selected_message = None;
                 self.preview_body.clear();
-                self.preview_content = text_editor::Content::new();
+                self.preview_markdown.clear();
                 self.preview_attachments.clear();
                 self.preview_image_handles.clear();
                 self.collapsed_threads.clear();
@@ -1698,7 +1725,7 @@ impl cosmic::Application for AppModel {
                                     Some(sel.min(self.messages.len() - 1))
                                 };
                                 self.preview_body.clear();
-                                self.preview_content = text_editor::Content::with_text("");
+                                self.preview_markdown.clear();
                                 self.preview_attachments.clear();
                                 self.preview_image_handles.clear();
                             }

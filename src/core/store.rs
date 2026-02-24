@@ -54,6 +54,7 @@ fn run_migrations(conn: &Connection) {
         "ALTER TABLE messages ADD COLUMN message_id TEXT",
         "ALTER TABLE messages ADD COLUMN in_reply_to TEXT",
         "ALTER TABLE messages ADD COLUMN thread_depth INTEGER DEFAULT 0",
+        "ALTER TABLE messages ADD COLUMN body_markdown TEXT",
     ];
     for sql in &alters {
         // "duplicate column name" is the expected error when already migrated
@@ -174,11 +175,12 @@ enum CacheCmd {
     },
     LoadBody {
         envelope_hash: u64,
-        reply: oneshot::Sender<Result<Option<(String, Vec<AttachmentData>)>, String>>,
+        reply: oneshot::Sender<Result<Option<(String, String, Vec<AttachmentData>)>, String>>,
     },
     SaveBody {
         envelope_hash: u64,
-        body: String,
+        body_markdown: String,
+        body_plain: String,
         attachments: Vec<AttachmentData>,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -314,7 +316,7 @@ impl CacheHandle {
     pub async fn load_body(
         &self,
         envelope_hash: u64,
-    ) -> Result<Option<(String, Vec<AttachmentData>)>, String> {
+    ) -> Result<Option<(String, String, Vec<AttachmentData>)>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::LoadBody {
@@ -328,14 +330,16 @@ impl CacheHandle {
     pub async fn save_body(
         &self,
         envelope_hash: u64,
-        body: String,
+        body_markdown: String,
+        body_plain: String,
         attachments: Vec<AttachmentData>,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::SaveBody {
                 envelope_hash,
-                body,
+                body_markdown,
+                body_plain,
                 attachments,
                 reply,
             })
@@ -453,14 +457,16 @@ impl CacheHandle {
                 }
                 CacheCmd::SaveBody {
                     envelope_hash,
-                    body,
+                    body_markdown,
+                    body_plain,
                     attachments,
                     reply,
                 } => {
                     let _ = reply.send(Self::do_save_body(
                         &conn,
                         envelope_hash,
-                        &body,
+                        &body_markdown,
+                        &body_plain,
                         &attachments,
                     ));
                 }
@@ -771,16 +777,21 @@ impl CacheHandle {
     fn do_load_body(
         conn: &Connection,
         envelope_hash: u64,
-    ) -> Result<Option<(String, Vec<AttachmentData>)>, String> {
-        let body = conn.query_row(
-            "SELECT body_rendered FROM messages WHERE envelope_hash = ?1",
+    ) -> Result<Option<(String, String, Vec<AttachmentData>)>, String> {
+        let row_result = conn.query_row(
+            "SELECT body_rendered, body_markdown FROM messages WHERE envelope_hash = ?1",
             [envelope_hash as i64],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         );
 
-        let body = match body {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(None),
+        let (body_plain, body_markdown) = match row_result {
+            Ok((Some(plain), md)) => (plain, md.unwrap_or_default()),
+            Ok((None, _)) => return Ok(None),
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(e) => return Err(format!("Cache body load error: {e}")),
         };
@@ -807,13 +818,14 @@ impl CacheHandle {
             attachments.push(row.map_err(|e| format!("Cache row error: {e}"))?);
         }
 
-        Ok(Some((body, attachments)))
+        Ok(Some((body_markdown, body_plain, attachments)))
     }
 
     fn do_save_body(
         conn: &Connection,
         envelope_hash: u64,
-        body: &str,
+        body_markdown: &str,
+        body_plain: &str,
         attachments: &[AttachmentData],
     ) -> Result<(), String> {
         let tx = conn
@@ -821,8 +833,8 @@ impl CacheHandle {
             .map_err(|e| format!("Cache tx error: {e}"))?;
 
         tx.execute(
-            "UPDATE messages SET body_rendered = ?1 WHERE envelope_hash = ?2",
-            rusqlite::params![body, envelope_hash as i64],
+            "UPDATE messages SET body_rendered = ?1, body_markdown = ?2 WHERE envelope_hash = ?3",
+            rusqlite::params![body_plain, body_markdown, envelope_hash as i64],
         )
         .map_err(|e| format!("Cache body save error: {e}"))?;
 

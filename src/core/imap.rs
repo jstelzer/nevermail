@@ -243,10 +243,11 @@ impl ImapSession {
     }
 
     /// Fetch and render the body of a single message, extracting attachments.
+    /// Returns (markdown_body, plain_body, attachments).
     pub async fn fetch_body(
         self: &Arc<Self>,
         envelope_hash: EnvelopeHash,
-    ) -> Result<(String, Vec<AttachmentData>), String> {
+    ) -> Result<(String, String, Vec<AttachmentData>), String> {
         let future = {
             let backend = self.backend.lock().await;
             backend
@@ -264,12 +265,16 @@ impl ImapSession {
         let body_attachment = mail.body();
         let (text_plain, text_html, attachments) = extract_body(&body_attachment);
 
-        let rendered = crate::core::mime::render_body(
+        let plain_rendered = crate::core::mime::render_body(
+            text_plain.as_deref(),
+            text_html.as_deref(),
+        );
+        let markdown_rendered = crate::core::mime::render_body_markdown(
             text_plain.as_deref(),
             text_html.as_deref(),
         );
 
-        Ok((rendered, attachments))
+        Ok((markdown_rendered, plain_rendered, attachments))
     }
 
     /// Start watching for backend events (IMAP IDLE or poll fallback).

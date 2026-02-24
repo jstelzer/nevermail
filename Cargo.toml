@@ -11,6 +11,7 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
     "tokio",
     "winit",
     "wgpu",
+    "markdown",
 ] }
 
 # Mail engine
@@ -24,6 +25,7 @@ lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 # HTML rendering
 html2text = "0.16"
 ammonia = "4"
+html2md = "0.2"
 
 # Local cache
 rusqlite = { version = "0.37", features = ["bundled"] }

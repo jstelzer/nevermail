@@ -14,7 +14,9 @@
       "Bash(head:*)",
       "Bash(cargo build:*)",
       "Bash(sqlite3 :memory::*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(clorinde schema:*)",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }

@@ -61,12 +61,19 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 - [x] **Phase 3**: Compose + send (SMTP via lettre)
 - [x] **Phase 4**: Attachments/Download
 - [x] **Phase 5**: Support multiple from addrs
-- [x] **Phase 6**: Background task / notifications
-- [ ] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark
+- [x] **Phase 6**: Background task / notifications 
+- [ ] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark  / FTS
 - [ ] **Phase 8**: Allow smtp creds to be distinct from imap
-- [ ] **Phase 9**: Search, OAuth2, multiple accounts
+- [ ] **Phase 9**: OAuth2, multiple accounts
 - [ ] **Phase 10**: Drag & Drop
 
+### Phase 7 -- context
+It's better not have to a full web engine in an email client. Converting HTML into a rich text widget (which iced does officially support) is all that's truly necessary.
+
+3h ago
+We are doing similar for appstream metadata in the COSMIC Store. They use HTML markup for their store pages and we simply convert that into a native interface. 
+
+Frostmark is pinned to a different version of iced.
 
 ### Phase 2b–d design notes
 

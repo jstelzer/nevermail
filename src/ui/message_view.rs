@@ -1,6 +1,6 @@
 use cosmic::iced::{ContentFit, Length};
 use cosmic::widget;
-use cosmic::widget::{image, text_editor};
+use cosmic::widget::{image, markdown};
 use cosmic::Element;
 
 use crate::app::Message;
@@ -8,12 +8,12 @@ use crate::core::models::{AttachmentData, MessageSummary};
 
 /// Render the message preview pane with an action toolbar when a message is selected.
 pub fn view<'a>(
-    body: &'a text_editor::Content,
+    markdown_items: &'a [markdown::Item],
     selected: Option<(usize, &MessageSummary)>,
     attachments: &[AttachmentData],
     image_handles: &[Option<image::Handle>],
 ) -> Element<'a, Message> {
-    if body.text().trim().is_empty() && attachments.is_empty() {
+    if markdown_items.is_empty() && attachments.is_empty() {
         return widget::container(widget::text::body("Select a message to read"))
             .padding(16)
             .width(Length::Fill)
@@ -24,8 +24,16 @@ pub fn view<'a>(
     let mut col = widget::column().spacing(0);
 
     if let Some((index, msg)) = selected {
-        let star_label = if msg.is_starred { "\u{2605}" } else { "\u{2606}" };
-        let read_label = if msg.is_read { "Mark unread" } else { "Mark read" };
+        let star_label = if msg.is_starred {
+            "\u{2605}"
+        } else {
+            "\u{2606}"
+        };
+        let read_label = if msg.is_read {
+            "Mark unread"
+        } else {
+            "Mark read"
+        };
 
         let toolbar = widget::row()
             .spacing(8)
@@ -34,6 +42,7 @@ pub fn view<'a>(
             .push(widget::button::text(star_label).on_press(Message::ToggleStar(index)))
             .push(widget::button::text(read_label).on_press(Message::ToggleRead(index)))
             .push(widget::button::text("Archive").on_press(Message::ArchiveMessage(index)))
+            .push(widget::button::text("Copy").on_press(Message::CopyBody))
             .push(widget::button::destructive("Trash").on_press(Message::TrashMessage(index)));
 
         col = col.push(
@@ -43,22 +52,25 @@ pub fn view<'a>(
         );
     }
 
-    if !body.text().is_empty() {
-        let body_content = widget::text_editor(body)
-            .on_action(Message::PreviewAction)
-            .padding(16)
-            .height(Length::Shrink);
+    if !markdown_items.is_empty() {
+        let md = markdown::view(
+            markdown_items,
+            markdown::Settings::default(),
+            markdown::Style::from_palette(cosmic::iced::Theme::Dark.palette()),
+        )
+        .map(Message::LinkClicked);
 
-        col = col.push(body_content);
+        col = col.push(widget::container(md).padding(16).width(Length::Fill));
     }
 
     // Attachments section
     if !attachments.is_empty() {
         let mut att_col = widget::column().spacing(8);
 
-        att_col = att_col.push(
-            widget::text::heading(format!("Attachments ({})", attachments.len())),
-        );
+        att_col = att_col.push(widget::text::heading(format!(
+            "Attachments ({})",
+            attachments.len()
+        )));
 
         for (i, att) in attachments.iter().enumerate() {
             let mut card = widget::column().spacing(4);
@@ -81,10 +93,7 @@ pub fn view<'a>(
                     widget::text::body(format!("{} ({})", att.filename, size_str))
                         .width(Length::Fill),
                 )
-                .push(
-                    widget::button::suggested("Save")
-                        .on_press(Message::SaveAttachment(i)),
-                );
+                .push(widget::button::suggested("Save").on_press(Message::SaveAttachment(i)));
 
             card = card.push(info);
 
