@@ -326,13 +326,21 @@ fn extract_parts(
             kind: Text::Plain, ..
         } if !att.content_disposition.kind.is_attachment() => {
             let bytes = att.decode(Default::default());
-            *plain = Some(String::from_utf8_lossy(&bytes).to_string());
+            let text = String::from_utf8_lossy(&bytes);
+            if !text.trim().is_empty() {
+                let combined = plain.take().unwrap_or_default() + &text;
+                *plain = Some(combined);
+            }
         }
         ContentType::Text {
             kind: Text::Html, ..
         } if !att.content_disposition.kind.is_attachment() => {
             let bytes = att.decode(Default::default());
-            *html = Some(String::from_utf8_lossy(&bytes).to_string());
+            let text = String::from_utf8_lossy(&bytes);
+            if !text.trim().is_empty() {
+                let combined = html.take().unwrap_or_default() + &text;
+                *html = Some(combined);
+            }
         }
         ContentType::Multipart { parts, .. } => {
             for part in parts {

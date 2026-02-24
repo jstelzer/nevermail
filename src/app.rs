@@ -162,6 +162,18 @@ pub enum ImapWatchEvent {
         from: String,
         envelope_hash: u64,
     },
+    MessageRemoved {
+        mailbox_hash: u64,
+        envelope_hash: u64,
+    },
+    FlagsChanged {
+        mailbox_hash: u64,
+        envelope_hash: u64,
+        flags: u8,
+    },
+    Rescan {
+        mailbox_hash: u64,
+    },
     WatchError(String),
     WatchEnded,
 }
@@ -1051,38 +1063,40 @@ impl cosmic::Application for AppModel {
                         let session = self.session.clone();
                         self.status_message = "Loading message...".into();
                         return cosmic::task::future(async move {
-                            match cache.load_body(envelope_hash).await {
-                                Ok(Some(body)) => {
-                                    // Cached body is text-only, no attachments
-                                    Message::BodyLoaded(Ok((body, Vec::new())))
-                                }
-                                _ => {
-                                    if let Some(session) = session {
-                                        let result = session
-                                            .fetch_body(EnvelopeHash(envelope_hash))
-                                            .await;
-                                        if let Ok((ref body, _)) = result {
-                                            if let Err(e) = cache
-                                                .save_body(envelope_hash, body.clone())
-                                                .await
-                                            {
-                                                log::warn!(
-                                                    "Failed to cache body: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                        Message::BodyLoaded(result)
-                                    } else {
-                                        Message::BodyLoaded(Err(
-                                            "Not connected".to_string()
-                                        ))
+                            // Unified cache-first: try cache (includes attachments)
+                            if let Ok(Some((body, attachments))) =
+                                cache.load_body(envelope_hash).await
+                            {
+                                return Message::BodyLoaded(Ok((body, attachments)));
+                            }
+
+                            // Cache miss: fetch from IMAP, save to cache
+                            if let Some(session) = session {
+                                let result = session
+                                    .fetch_body(EnvelopeHash(envelope_hash))
+                                    .await;
+                                if let Ok((ref body, ref attachments)) = result {
+                                    if let Err(e) = cache
+                                        .save_body(
+                                            envelope_hash,
+                                            body.clone(),
+                                            attachments.clone(),
+                                        )
+                                        .await
+                                    {
+                                        log::warn!("Failed to cache body: {}", e);
                                     }
                                 }
+                                Message::BodyLoaded(result)
+                            } else {
+                                Message::BodyLoaded(Err(
+                                    "Not connected".to_string()
+                                ))
                             }
                         });
                     }
 
+                    // No-cache fallback: direct IMAP fetch
                     if let Some(session) = &self.session {
                         let session = session.clone();
                         self.status_message = "Loading message...".into();
@@ -1548,6 +1562,89 @@ impl cosmic::Application for AppModel {
                 }
                 return notif_task;
             }
+            Message::ImapEvent(ImapWatchEvent::MessageRemoved {
+                mailbox_hash,
+                envelope_hash,
+            }) => {
+                // Only act if we're viewing the affected mailbox
+                let viewing_mailbox = self.selected_folder.and_then(|i| self.folders.get(i))
+                    .map_or(false, |f| f.mailbox_hash == mailbox_hash);
+
+                if viewing_mailbox {
+                    // Find and remove from messages list
+                    if let Some(pos) = self.messages.iter().position(|m| m.envelope_hash == envelope_hash) {
+                        self.messages.remove(pos);
+
+                        // Adjust selection
+                        match self.selected_message {
+                            Some(sel) if sel == pos => {
+                                // Selected message was removed — clear preview
+                                self.selected_message = if self.messages.is_empty() {
+                                    None
+                                } else {
+                                    Some(sel.min(self.messages.len() - 1))
+                                };
+                                self.preview_body.clear();
+                                self.preview_content = text_editor::Content::with_text("");
+                                self.preview_attachments.clear();
+                                self.preview_image_handles.clear();
+                            }
+                            Some(sel) if sel > pos => {
+                                self.selected_message = Some(sel - 1);
+                            }
+                            _ => {}
+                        }
+
+                        self.recompute_visible();
+                    }
+
+                    // Fire-and-forget cache cleanup
+                    if let Some(cache) = &self.cache {
+                        let cache = cache.clone();
+                        return cosmic::task::future(async move {
+                            if let Err(e) = cache.remove_message(envelope_hash).await {
+                                log::warn!("Failed to remove message from cache: {}", e);
+                            }
+                            Message::Noop
+                        });
+                    }
+                }
+            }
+
+            Message::ImapEvent(ImapWatchEvent::FlagsChanged {
+                mailbox_hash,
+                envelope_hash,
+                flags,
+            }) => {
+                let viewing_mailbox = self.selected_folder.and_then(|i| self.folders.get(i))
+                    .map_or(false, |f| f.mailbox_hash == mailbox_hash);
+
+                if viewing_mailbox {
+                    let (is_read, is_starred) = store::flags_from_u8(flags);
+                    if let Some(msg) = self.messages.iter_mut()
+                        .find(|m| m.envelope_hash == envelope_hash)
+                    {
+                        msg.is_read = is_read;
+                        msg.is_starred = is_starred;
+                    }
+
+                    // Sync server flags and clear any pending op in cache
+                    if let Some(cache) = &self.cache {
+                        let cache = cache.clone();
+                        return cosmic::task::future(async move {
+                            if let Err(e) = cache.clear_pending_op(envelope_hash, flags).await {
+                                log::warn!("Failed to sync flags in cache: {}", e);
+                            }
+                            Message::Noop
+                        });
+                    }
+                }
+            }
+
+            Message::ImapEvent(ImapWatchEvent::Rescan { .. }) => {
+                return self.update(Message::Refresh);
+            }
+
             Message::ImapEvent(ImapWatchEvent::WatchError(e)) => {
                 log::warn!("IMAP watch error: {}", e);
             }
@@ -1720,21 +1817,56 @@ fn imap_watch_stream(
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(BackendEvent::Refresh(rev)) => {
-                            if let RefreshEventKind::Create(envelope) = rev.kind {
-                                let from = envelope
-                                    .from()
-                                    .iter()
-                                    .map(|a| a.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                let _ = output
-                                    .send(ImapWatchEvent::NewMessage {
-                                        mailbox_hash: rev.mailbox_hash.0,
-                                        subject: envelope.subject().to_string(),
-                                        from,
-                                        envelope_hash: envelope.hash().0,
-                                    })
-                                    .await;
+                            match rev.kind {
+                                RefreshEventKind::Create(envelope) => {
+                                    let from = envelope
+                                        .from()
+                                        .iter()
+                                        .map(|a| a.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let _ = output
+                                        .send(ImapWatchEvent::NewMessage {
+                                            mailbox_hash: rev.mailbox_hash.0,
+                                            subject: envelope.subject().to_string(),
+                                            from,
+                                            envelope_hash: envelope.hash().0,
+                                        })
+                                        .await;
+                                }
+                                RefreshEventKind::Remove(envelope_hash) => {
+                                    let _ = output
+                                        .send(ImapWatchEvent::MessageRemoved {
+                                            mailbox_hash: rev.mailbox_hash.0,
+                                            envelope_hash: envelope_hash.0,
+                                        })
+                                        .await;
+                                }
+                                RefreshEventKind::NewFlags(envelope_hash, (flag, _tags)) => {
+                                    let is_read = flag.contains(Flag::SEEN);
+                                    let is_starred = flag.contains(Flag::FLAGGED);
+                                    let flags = store::flags_to_u8(is_read, is_starred);
+                                    let _ = output
+                                        .send(ImapWatchEvent::FlagsChanged {
+                                            mailbox_hash: rev.mailbox_hash.0,
+                                            envelope_hash: envelope_hash.0,
+                                            flags,
+                                        })
+                                        .await;
+                                }
+                                RefreshEventKind::Rescan => {
+                                    let _ = output
+                                        .send(ImapWatchEvent::Rescan {
+                                            mailbox_hash: rev.mailbox_hash.0,
+                                        })
+                                        .await;
+                                }
+                                other => {
+                                    log::debug!(
+                                        "Unhandled IMAP watch event kind: {:?}",
+                                        other
+                                    );
+                                }
                             }
                         }
                         Ok(_) => {}

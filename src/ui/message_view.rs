@@ -13,7 +13,7 @@ pub fn view<'a>(
     attachments: &[AttachmentData],
     image_handles: &[Option<image::Handle>],
 ) -> Element<'a, Message> {
-    if body.text().is_empty() {
+    if body.text().is_empty() && attachments.is_empty() {
         return widget::container(widget::text::body("Select a message to read"))
             .padding(16)
             .width(Length::Fill)
@@ -43,12 +43,14 @@ pub fn view<'a>(
         );
     }
 
-    let body_content = widget::text_editor(body)
-        .on_action(Message::PreviewAction)
-        .padding(16)
-        .height(Length::Shrink);
+    if !body.text().is_empty() {
+        let body_content = widget::text_editor(body)
+            .on_action(Message::PreviewAction)
+            .padding(16)
+            .height(Length::Shrink);
 
-    col = col.push(body_content);
+        col = col.push(body_content);
+    }
 
     // Attachments section
     if !attachments.is_empty() {

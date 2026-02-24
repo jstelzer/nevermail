@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core::models::{Folder, MessageSummary};
+use crate::core::models::{AttachmentData, Folder, MessageSummary};
 
 const PAGE_SIZE: u32 = 50;
 
@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox
     ON messages(mailbox_hash, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    envelope_hash INTEGER NOT NULL,
+    idx INTEGER NOT NULL,
+    filename TEXT NOT NULL DEFAULT 'unnamed',
+    mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    data BLOB NOT NULL,
+    PRIMARY KEY (envelope_hash, idx)
+);
 ";
 
 /// Run forward-only migrations. Each ALTER is idempotent (ignores "duplicate column" errors).
@@ -118,11 +127,12 @@ enum CacheCmd {
     },
     LoadBody {
         envelope_hash: u64,
-        reply: oneshot::Sender<Result<Option<String>, String>>,
+        reply: oneshot::Sender<Result<Option<(String, Vec<AttachmentData>)>, String>>,
     },
     SaveBody {
         envelope_hash: u64,
         body: String,
+        attachments: Vec<AttachmentData>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     // Phase 2b: dual-truth flag ops
@@ -250,7 +260,10 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    pub async fn load_body(&self, envelope_hash: u64) -> Result<Option<String>, String> {
+    pub async fn load_body(
+        &self,
+        envelope_hash: u64,
+    ) -> Result<Option<(String, Vec<AttachmentData>)>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::LoadBody {
@@ -261,12 +274,18 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    pub async fn save_body(&self, envelope_hash: u64, body: String) -> Result<(), String> {
+    pub async fn save_body(
+        &self,
+        envelope_hash: u64,
+        body: String,
+        attachments: Vec<AttachmentData>,
+    ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::SaveBody {
                 envelope_hash,
                 body,
+                attachments,
                 reply,
             })
             .map_err(|_| "Cache unavailable".to_string())?;
@@ -375,9 +394,15 @@ impl CacheHandle {
                 CacheCmd::SaveBody {
                     envelope_hash,
                     body,
+                    attachments,
                     reply,
                 } => {
-                    let _ = reply.send(Self::do_save_body(&conn, envelope_hash, &body));
+                    let _ = reply.send(Self::do_save_body(
+                        &conn,
+                        envelope_hash,
+                        &body,
+                        &attachments,
+                    ));
                 }
                 CacheCmd::UpdateFlags {
                     envelope_hash,
@@ -514,6 +539,15 @@ impl CacheHandle {
                 }
             }
         }
+
+        // Cascade: delete attachments for non-pending messages before removing message rows
+        tx.execute(
+            "DELETE FROM attachments WHERE envelope_hash IN (
+                SELECT envelope_hash FROM messages WHERE mailbox_hash = ?1 AND pending_op IS NULL
+            )",
+            [mailbox_hash as i64],
+        )
+        .map_err(|e| format!("Cache attachment cascade error: {e}"))?;
 
         // Delete non-pending messages for this mailbox
         tx.execute(
@@ -671,26 +705,91 @@ impl CacheHandle {
         .map_err(|e| format!("Cache count error: {e}"))
     }
 
-    fn do_load_body(conn: &Connection, envelope_hash: u64) -> Result<Option<String>, String> {
-        let result = conn.query_row(
+    fn do_load_body(
+        conn: &Connection,
+        envelope_hash: u64,
+    ) -> Result<Option<(String, Vec<AttachmentData>)>, String> {
+        let body = conn.query_row(
             "SELECT body_rendered FROM messages WHERE envelope_hash = ?1",
             [envelope_hash as i64],
             |row| row.get::<_, Option<String>>(0),
         );
 
-        match result {
-            Ok(body) => Ok(body),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(format!("Cache body load error: {e}")),
+        let body = match body {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(format!("Cache body load error: {e}")),
+        };
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT idx, filename, mime_type, data FROM attachments
+                 WHERE envelope_hash = ?1 ORDER BY idx",
+            )
+            .map_err(|e| format!("Cache prepare error: {e}"))?;
+
+        let rows = stmt
+            .query_map([envelope_hash as i64], |row| {
+                Ok(AttachmentData {
+                    filename: row.get(1)?,
+                    mime_type: row.get(2)?,
+                    data: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("Cache query error: {e}"))?;
+
+        let mut attachments = Vec::new();
+        for row in rows {
+            attachments.push(row.map_err(|e| format!("Cache row error: {e}"))?);
         }
+
+        Ok(Some((body, attachments)))
     }
 
-    fn do_save_body(conn: &Connection, envelope_hash: u64, body: &str) -> Result<(), String> {
-        conn.execute(
+    fn do_save_body(
+        conn: &Connection,
+        envelope_hash: u64,
+        body: &str,
+        attachments: &[AttachmentData],
+    ) -> Result<(), String> {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Cache tx error: {e}"))?;
+
+        tx.execute(
             "UPDATE messages SET body_rendered = ?1 WHERE envelope_hash = ?2",
             rusqlite::params![body, envelope_hash as i64],
         )
         .map_err(|e| format!("Cache body save error: {e}"))?;
+
+        tx.execute(
+            "DELETE FROM attachments WHERE envelope_hash = ?1",
+            [envelope_hash as i64],
+        )
+        .map_err(|e| format!("Cache attachment delete error: {e}"))?;
+
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO attachments (envelope_hash, idx, filename, mime_type, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(|e| format!("Cache prepare error: {e}"))?;
+
+        for (i, att) in attachments.iter().enumerate() {
+            stmt.execute(rusqlite::params![
+                envelope_hash as i64,
+                i as i32,
+                att.filename,
+                att.mime_type,
+                att.data,
+            ])
+            .map_err(|e| format!("Cache attachment insert error: {e}"))?;
+        }
+        drop(stmt);
+
+        tx.commit()
+            .map_err(|e| format!("Cache commit error: {e}"))?;
         Ok(())
     }
 
@@ -753,6 +852,12 @@ impl CacheHandle {
     }
 
     fn do_remove_message(conn: &Connection, envelope_hash: u64) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM attachments WHERE envelope_hash = ?1",
+            [envelope_hash as i64],
+        )
+        .map_err(|e| format!("Cache attachment cascade error: {e}"))?;
+
         conn.execute(
             "DELETE FROM messages WHERE envelope_hash = ?1",
             [envelope_hash as i64],
