@@ -91,11 +91,8 @@ pub enum Message {
     Connected(Result<Arc<ImapSession>, String>),
 
     SelectFolder(usize),
-    FoldersLoaded(Result<Vec<Folder>, String>),
 
     SelectMessage(usize),
-    MessagesLoaded(Result<Vec<MessageSummary>, String>),
-
     BodyLoaded(Result<(String, String, Vec<AttachmentData>), String>),
     LinkClicked(markdown::Url),
     CopyBody,
@@ -151,7 +148,6 @@ pub enum Message {
     SearchResultsLoaded(Result<Vec<MessageSummary>, String>),
     SearchClear,
 
-    OpenLink(String),
     Refresh,
     Noop,
 
@@ -173,7 +169,6 @@ pub enum ImapWatchEvent {
         mailbox_hash: u64,
         subject: String,
         from: String,
-        envelope_hash: u64,
     },
     MessageRemoved {
         mailbox_hash: u64,
@@ -184,9 +179,7 @@ pub enum ImapWatchEvent {
         envelope_hash: u64,
         flags: u8,
     },
-    Rescan {
-        mailbox_hash: u64,
-    },
+    Rescan,
     WatchError(String),
     WatchEnded,
 }
@@ -970,36 +963,6 @@ impl cosmic::Application for AppModel {
             }
 
             // -----------------------------------------------------------------
-            // Legacy direct-from-server messages (used as fallback when no cache)
-            // -----------------------------------------------------------------
-            Message::FoldersLoaded(Ok(folders)) => {
-                self.folders = folders;
-                self.rebuild_folder_map();
-                self.is_syncing = false;
-                self.status_message = format!("{} folders loaded", self.folders.len());
-
-                if let Some(idx) = self.folders.iter().position(|f| f.path == "INBOX") {
-                    self.selected_folder = Some(idx);
-                    let mailbox_hash = MailboxHash(self.folders[idx].mailbox_hash);
-                    if let Some(session) = &self.session {
-                        let session = session.clone();
-                        self.is_syncing = true;
-                        self.status_message = "Loading INBOX...".into();
-                        return cosmic::task::future(async move {
-                            Message::MessagesLoaded(
-                                session.fetch_messages(mailbox_hash).await,
-                            )
-                        });
-                    }
-                }
-            }
-            Message::FoldersLoaded(Err(e)) => {
-                self.is_syncing = false;
-                self.status_message = format!("Failed to load folders: {}", e);
-                log::error!("Folder fetch failed: {}", e);
-            }
-
-            // -----------------------------------------------------------------
             // Select folder — cache-first with background sync
             // -----------------------------------------------------------------
             Message::SelectFolder(index) => {
@@ -1055,18 +1018,6 @@ impl cosmic::Application for AppModel {
                         return cosmic::task::batch(tasks);
                     }
                 }
-            }
-
-            Message::MessagesLoaded(Ok(messages)) => {
-                self.is_syncing = false;
-                self.status_message = format!("{} messages", messages.len());
-                self.messages = messages;
-                self.recompute_visible();
-            }
-            Message::MessagesLoaded(Err(e)) => {
-                self.is_syncing = false;
-                self.status_message = format!("Failed to load messages: {}", e);
-                log::error!("Message fetch failed: {}", e);
             }
 
             // -----------------------------------------------------------------
@@ -1667,9 +1618,6 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::OpenLink(url) => {
-                crate::core::mime::open_link(&url);
-            }
             // -----------------------------------------------------------------
             // IMAP watch events (new mail notifications)
             // -----------------------------------------------------------------
@@ -1677,7 +1625,6 @@ impl cosmic::Application for AppModel {
                 mailbox_hash,
                 subject,
                 from,
-                ..
             }) => {
                 let notif_task = cosmic::task::future(async move {
                     let _ = tokio::task::spawn_blocking(move || {
@@ -1781,7 +1728,7 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::ImapEvent(ImapWatchEvent::Rescan { .. }) => {
+            Message::ImapEvent(ImapWatchEvent::Rescan) => {
                 return self.update(Message::Refresh);
             }
 
@@ -1970,7 +1917,6 @@ fn imap_watch_stream(
                                             mailbox_hash: rev.mailbox_hash.0,
                                             subject: envelope.subject().to_string(),
                                             from,
-                                            envelope_hash: envelope.hash().0,
                                         })
                                         .await;
                                 }
@@ -1996,9 +1942,7 @@ fn imap_watch_stream(
                                 }
                                 RefreshEventKind::Rescan => {
                                     let _ = output
-                                        .send(ImapWatchEvent::Rescan {
-                                            mailbox_hash: rev.mailbox_hash.0,
-                                        })
+                                        .send(ImapWatchEvent::Rescan)
                                         .await;
                                 }
                                 other => {

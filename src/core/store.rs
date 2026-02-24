@@ -169,10 +169,6 @@ enum CacheCmd {
         offset: u32,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
     },
-    MessageCount {
-        mailbox_hash: u64,
-        reply: oneshot::Sender<Result<u32, String>>,
-    },
     LoadBody {
         envelope_hash: u64,
         reply: oneshot::Sender<Result<Option<(String, String, Vec<AttachmentData>)>, String>>,
@@ -296,17 +292,6 @@ impl CacheHandle {
                 mailbox_hash,
                 limit,
                 offset,
-                reply,
-            })
-            .map_err(|_| "Cache unavailable".to_string())?;
-        rx.await.map_err(|_| "Cache unavailable".to_string())?
-    }
-
-    pub async fn message_count(&self, mailbox_hash: u64) -> Result<u32, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CacheCmd::MessageCount {
-                mailbox_hash,
                 reply,
             })
             .map_err(|_| "Cache unavailable".to_string())?;
@@ -442,12 +427,6 @@ impl CacheHandle {
                 } => {
                     let _ =
                         reply.send(Self::do_load_messages(&conn, mailbox_hash, limit, offset));
-                }
-                CacheCmd::MessageCount {
-                    mailbox_hash,
-                    reply,
-                } => {
-                    let _ = reply.send(Self::do_message_count(&conn, mailbox_hash));
                 }
                 CacheCmd::LoadBody {
                     envelope_hash,
@@ -763,15 +742,6 @@ impl CacheHandle {
             messages.push(row.map_err(|e| format!("Cache row error: {e}"))?);
         }
         Ok(messages)
-    }
-
-    fn do_message_count(conn: &Connection, mailbox_hash: u64) -> Result<u32, String> {
-        conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE mailbox_hash = ?1",
-            [mailbox_hash as i64],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Cache count error: {e}"))
     }
 
     fn do_load_body(

@@ -62,7 +62,7 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 - [x] **Phase 4**: Attachments/Download
 - [x] **Phase 5**: Support multiple from addrs
 - [x] **Phase 6**: Background task / notifications 
-- [x] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark  / FTS
+- [x] **Phase 7**: Figure out html rendering and consider adding https://g ithub.com/Mrmayman/frostmark  / FTS
 - [ ] **Phase 8**: Drag & Drop
 - [ ] **Phase 9**: Allow smtp creds to be distinct from imap
 - [ ] **Phase 10**: OAuth2, multiple accounts
@@ -96,6 +96,22 @@ Gmail requires the `https://mail.google.com/` scope for IMAP — a **restricted 
 Thunderbird and Outlook ship pre-approved client IDs because Mozilla and Microsoft can absorb that overhead. Smaller open source clients either ask users to create their own Google Cloud credentials (each user runs as a "test app" — functional but ugly UX), or they just don't bother.
 
 For now, nevermail targets standard IMAP providers (Runbox, Fastmail, Migadu, self-hosted, etc.) that work with normal credentials. If the project ever reaches a scale where Google verification is worth pursuing, the Rust ecosystem is ready — [`oauth2-rs`](https://github.com/ramosbugs/oauth2-rs) handles PKCE flows and token refresh, and melib already supports XOAUTH2 in its account config. The plumbing isn't hard; the bureaucracy is.
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Next message |
+| `k` / `↑` | Previous message |
+| `Enter` | Open selected message |
+| `Space` | Collapse/expand thread |
+| `/` | Focus search |
+| `Escape` | Clear search |
+| `c` | Compose new message |
+| `r` | Reply to selected message |
+| `f` | Forward selected message |
+
+Message actions (buttons in preview pane): toggle read, toggle star, archive, trash, copy body, save attachment.
 
 ## Not yet supported
 

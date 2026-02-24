@@ -29,10 +29,3 @@ pub fn set_password(username: &str, server: &str, password: &str) -> Result<(), 
         format!("keyring set: {e}")
     })
 }
-
-pub fn delete_password(username: &str, server: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, &key_id(username, server)).map_err(|e| format!("keyring error: {e}"))?;
-    entry
-        .delete_credential()
-        .map_err(|e| format!("keyring delete: {e}"))
-}

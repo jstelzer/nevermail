@@ -29,24 +29,6 @@ pub struct MessageSummary {
     pub thread_depth: u32,
 }
 
-/// Full message body for the preview pane.
-#[derive(Debug, Clone)]
-pub struct MessageBody {
-    pub uid: u64,
-    pub text_plain: Option<String>,
-    pub text_html: Option<String>,
-    pub rendered: String,
-    pub attachments: Vec<Attachment>,
-}
-
-/// An email attachment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attachment {
-    pub filename: String,
-    pub mime_type: String,
-    pub size: u64,
-}
-
 /// Decoded attachment data for display and saving.
 #[derive(Debug, Clone)]
 pub struct AttachmentData {
@@ -63,11 +45,3 @@ impl AttachmentData {
     }
 }
 
-/// Account connection state.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConnectionState {
-    Disconnected,
-    Connecting,
-    Connected,
-    Error(String),
-}
