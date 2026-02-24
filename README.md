@@ -2,21 +2,21 @@
 
 A COSMIC desktop email client for Linux, built in Rust.
 
-So thi
-**Status:** Early alpha — connects, caches, browses. Read-only.
+**Status:** Early alpha — connects, caches, sends, renders HTML. Single account.
 
 ## Stack
 
-| Component   | Crate                                            | Role                                  |
-|-------------|--------------------------------------------------|---------------------------------------|
-| UI          | [libcosmic](https://github.com/pop-os/libcosmic) | COSMIC desktop toolkit (iced-based)   |
-| Mail engine | [melib](https://crates.io/crates/melib)          | IMAP, MIME parsing, envelope handling |
-| SMTP        | [lettre](https://crates.io/crates/lettre)        | Outbound mail delivery (not yet wired)|
-| HTML render | [html2text](https://crates.io/crates/html2text)  | Plain-text conversion for HTML emails |
-| Sanitizer   | [ammonia](https://crates.io/crates/ammonia)      | HTML sanitization                     |
-| Cache       | [rusqlite](https://crates.io/crates/rusqlite)    | Local SQLite message cache            |
-| Credentials | [keyring](https://crates.io/crates/keyring)      | OS keyring (libsecret/gnome-keyring)  |
-| Async       | [tokio](https://crates.io/crates/tokio)          | Async runtime                         |
+| Component   | Crate                                                       | Role                                      |
+|-------------|-------------------------------------------------------------|-------------------------------------------|
+| UI          | [libcosmic](https://github.com/pop-os/libcosmic)            | COSMIC desktop toolkit (iced-based)       |
+| Mail engine | [melib](https://crates.io/crates/melib)                     | IMAP, MIME parsing, envelope handling     |
+| SMTP        | [lettre](https://crates.io/crates/lettre)                   | Outbound mail delivery (not yet wired)    |
+| HTML render | [html2md](https://crates.io/crates/html2md) + iced markdown | HTML → markdown → native rich text        |
+| Sanitizer   | [ammonia](https://crates.io/crates/ammonia)                 | Strip email layout junk before conversion |
+| Plaintext   | [html2text](https://crates.io/crates/html2text)             | Plain-text fallback for quoting/FTS       |
+| Cache       | [rusqlite](https://crates.io/crates/rusqlite)               | Local SQLite message cache                |
+| Credentials | [keyring](https://crates.io/crates/keyring)                 | OS keyring (libsecret/gnome-keyring)      |
+| Async       | [tokio](https://crates.io/crates/tokio)                     | Async runtime                             |
 
 ## Architecture
 
@@ -62,10 +62,10 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 - [x] **Phase 4**: Attachments/Download
 - [x] **Phase 5**: Support multiple from addrs
 - [x] **Phase 6**: Background task / notifications 
-- [ ] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark  / FTS
-- [ ] **Phase 8**: Allow smtp creds to be distinct from imap
-- [ ] **Phase 9**: OAuth2, multiple accounts
-- [ ] **Phase 10**: Drag & Drop
+- [x] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark  / FTS
+- [ ] **Phase 8**: Drag & Drop
+- [ ] **Phase 9**: Allow smtp creds to be distinct from imap
+- [ ] **Phase 10**: OAuth2, multiple accounts
 
 ### Phase 7 -- context
 It's better not have to a full web engine in an email client. Converting HTML into a rich text widget (which iced does officially support) is all that's truly necessary.
@@ -83,12 +83,24 @@ Frostmark is pinned to a different version of iced.
 
 **Threading** is computed in the cache layer from `Message-ID`, `In-Reply-To`, and `References` headers — not in the view. Thread metadata (thread_id, depth, order_key) lives in SQLite so the list can render without recomputing every frame.
 
+### OAuth2
+
+Nevermail uses password authentication (stored in the OS keyring). OAuth2 is not supported.
+
+Gmail requires the `https://mail.google.com/` scope for IMAP — a **restricted scope** under Google's verification policy. That means:
+
+- A third-party security audit before approval
+- Annual re-verification
+- The audit and process are designed for companies, not indie projects
+
+Thunderbird and Outlook ship pre-approved client IDs because Mozilla and Microsoft can absorb that overhead. Smaller open source clients either ask users to create their own Google Cloud credentials (each user runs as a "test app" — functional but ugly UX), or they just don't bother.
+
+For now, nevermail targets standard IMAP providers (Runbox, Fastmail, Migadu, self-hosted, etc.) that work with normal credentials. If the project ever reaches a scale where Google verification is worth pursuing, the Rust ecosystem is ready — [`oauth2-rs`](https://github.com/ramosbugs/oauth2-rs) handles PKCE flows and token refresh, and melib already supports XOAUTH2 in its account config. The plumbing isn't hard; the bureaucracy is.
+
 ## Not yet supported
 
-- OAuth2 (password-only auth for now)
 - Multiple accounts
-- Full-text search
-- Real HTML rendering (text-only via html2text)
+- Drag and drop
 
 ## Building
 
@@ -115,4 +127,4 @@ export NEVERMAIL_STARTTLS=false
 
 ## License
 
-Apache-2.0
+Apache-2.0/MIT
