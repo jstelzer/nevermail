@@ -55,6 +55,7 @@ fn run_migrations(conn: &Connection) {
         "ALTER TABLE messages ADD COLUMN in_reply_to TEXT",
         "ALTER TABLE messages ADD COLUMN thread_depth INTEGER DEFAULT 0",
         "ALTER TABLE messages ADD COLUMN body_markdown TEXT",
+        "ALTER TABLE messages ADD COLUMN reply_to TEXT",
     ];
     for sql in &alters {
         // "duplicate column name" is the expected error when already migrated
@@ -608,8 +609,8 @@ impl CacheHandle {
                 "INSERT OR IGNORE INTO messages
                  (envelope_hash, mailbox_hash, subject, sender, date, timestamp,
                   is_read, is_starred, has_attachments, thread_id, flags_server, flags_local,
-                  message_id, in_reply_to, thread_depth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  message_id, in_reply_to, thread_depth, reply_to)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )
             .map_err(|e| format!("Cache prepare error: {e}"))?;
 
@@ -618,8 +619,8 @@ impl CacheHandle {
             .prepare(
                 "UPDATE messages SET flags_server = ?1, subject = ?2, sender = ?3,
                  date = ?4, timestamp = ?5, has_attachments = ?6, thread_id = ?7,
-                 message_id = ?8, in_reply_to = ?9, thread_depth = ?10
-                 WHERE envelope_hash = ?11 AND pending_op IS NOT NULL",
+                 message_id = ?8, in_reply_to = ?9, thread_depth = ?10, reply_to = ?11
+                 WHERE envelope_hash = ?12 AND pending_op IS NOT NULL",
             )
             .map_err(|e| format!("Cache prepare error: {e}"))?;
 
@@ -640,6 +641,7 @@ impl CacheHandle {
                         m.message_id,
                         m.in_reply_to,
                         m.thread_depth,
+                        m.reply_to,
                         m.envelope_hash as i64,
                     ])
                     .map_err(|e| format!("Cache update error: {e}"))?;
@@ -661,6 +663,7 @@ impl CacheHandle {
                     m.message_id,
                     m.in_reply_to,
                     m.thread_depth,
+                    m.reply_to,
                 ])
                 .map_err(|e| format!("Cache insert error: {e}"))?;
             }
@@ -684,7 +687,7 @@ impl CacheHandle {
                 "SELECT envelope_hash, subject, sender, date, timestamp,
                         is_read, is_starred, has_attachments, thread_id,
                         flags_server, flags_local, pending_op, mailbox_hash,
-                        message_id, in_reply_to, thread_depth
+                        message_id, in_reply_to, thread_depth, reply_to
                  FROM messages
                  WHERE mailbox_hash = ?1
                  ORDER BY
@@ -731,6 +734,7 @@ impl CacheHandle {
                         message_id: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
                         in_reply_to: row.get(14)?,
                         thread_depth: row.get::<_, Option<u32>>(15)?.unwrap_or(0),
+                        reply_to: row.get(16)?,
                     })
                 },
             )
@@ -921,7 +925,7 @@ impl CacheHandle {
                 "SELECT m.envelope_hash, m.subject, m.sender, m.date, m.timestamp,
                         m.is_read, m.is_starred, m.has_attachments, m.thread_id,
                         m.flags_server, m.flags_local, m.pending_op, m.mailbox_hash,
-                        m.message_id, m.in_reply_to, m.thread_depth
+                        m.message_id, m.in_reply_to, m.thread_depth, m.reply_to
                  FROM messages m
                  WHERE m.rowid IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?1)
                  ORDER BY m.timestamp DESC
@@ -960,6 +964,7 @@ impl CacheHandle {
                     message_id: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
                     in_reply_to: row.get(14)?,
                     thread_depth: row.get::<_, Option<u32>>(15)?.unwrap_or(0),
+                    reply_to: row.get(16)?,
                 })
             })
             .map_err(|e| format!("Search query error: {e}"))?;

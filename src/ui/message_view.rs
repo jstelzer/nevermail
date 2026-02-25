@@ -9,7 +9,7 @@ use crate::core::models::{AttachmentData, MessageSummary};
 /// Render the message preview pane with an action toolbar when a message is selected.
 pub fn view<'a>(
     markdown_items: &'a [markdown::Item],
-    selected: Option<(usize, &MessageSummary)>,
+    selected: Option<(usize, &'a MessageSummary)>,
     attachments: &[AttachmentData],
     image_handles: &[Option<image::Handle>],
 ) -> Element<'a, Message> {
@@ -49,6 +49,14 @@ pub fn view<'a>(
             widget::container(toolbar)
                 .padding([8, 16])
                 .width(Length::Fill),
+        );
+
+        // Message header info
+        col = col.push(
+            widget::container(message_header(msg))
+                .padding([4, 16])
+                .width(Length::Fill)
+                .class(cosmic::style::Container::Card),
         );
     }
 
@@ -116,6 +124,32 @@ pub fn view<'a>(
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+fn header_row<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
+    widget::row()
+        .spacing(8)
+        .push(
+            widget::text::body(label)
+                .width(Length::Fixed(80.0))
+                .font(cosmic::iced::Font {
+                    weight: cosmic::iced::font::Weight::Bold,
+                    ..Default::default()
+                }),
+        )
+        .push(widget::text::body(value).width(Length::Fill))
+        .into()
+}
+
+fn message_header<'a>(msg: &'a MessageSummary) -> Element<'a, Message> {
+    let mut col = widget::column().spacing(4);
+    col = col.push(header_row("From:", &msg.from));
+    col = col.push(header_row("Subject:", &msg.subject));
+    col = col.push(header_row("Date:", &msg.date));
+    if let Some(ref reply_to) = msg.reply_to {
+        col = col.push(header_row("Reply-To:", reply_to));
+    }
+    col.into()
 }
 
 fn human_size(bytes: usize) -> String {

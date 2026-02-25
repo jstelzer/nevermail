@@ -3,7 +3,7 @@ bin_dir := prefix / "bin"
 icon_dir := prefix / "share/icons/hicolor"
 app_dir := prefix / "share/applications"
 
-release:
+release: build
     cargo build --release
 
 build:

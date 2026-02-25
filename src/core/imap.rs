@@ -171,6 +171,11 @@ impl ImapSession {
                     .in_reply_to()
                     .and_then(|r| r.refs().last().map(|id| id.to_string()));
 
+                let reply_to = envelope
+                    .other_headers()
+                    .get("Reply-To")
+                    .map(|s| s.to_string());
+
                 messages.push(MessageSummary {
                     uid: envelope.hash().0,
                     subject: envelope.subject().to_string(),
@@ -185,6 +190,7 @@ impl ImapSession {
                     mailbox_hash: mailbox_hash.0,
                     message_id: msg_id,
                     in_reply_to,
+                    reply_to,
                     thread_depth,
                 });
             }
