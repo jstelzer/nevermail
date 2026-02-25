@@ -6,6 +6,8 @@
 
 A COSMIC desktop email client for Linux, built in Rust.
 
+Built for users who prefer native, privacy-respecting desktop software over webmail.
+
 **Status:** Alpha — single-account IMAP client with compose, search, threading, drag-and-drop, and HTML rendering. Daily-driveable on standard IMAP providers.
 
 <p align="center">
