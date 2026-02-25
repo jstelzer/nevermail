@@ -21,7 +21,7 @@ use crate::core::smtp::{self, OutgoingEmail};
 use crate::core::store::{self, CacheHandle, DEFAULT_PAGE_SIZE};
 use crate::ui::compose_dialog::ComposeMode;
 
-const APP_ID: &str = "com.cosmic_utils.email";
+const APP_ID: &str = "com.neverlight.email";
 
 pub struct AppModel {
     core: Core,
