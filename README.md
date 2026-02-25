@@ -8,6 +8,10 @@ A COSMIC desktop email client for Linux, built in Rust.
 
 **Status:** Alpha — single-account IMAP client with compose, search, threading, drag-and-drop, and HTML rendering. Daily-driveable on standard IMAP providers.
 
+<p align="center">
+  <img src="images/screenshot.png" alt="Nevermail screenshot" width="800" />
+</p>
+
 ## Features
 
 - **Three-pane layout** — folder sidebar, message list, preview pane
@@ -85,6 +89,22 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 - **Optimistic UI with reconciliation.** Flag toggles and moves update the UI immediately, write to cache, then enqueue the IMAP operation. Conflicts reconcile on the next sync.
 - **`core/` stays UI-independent.** No COSMIC types leak into the mail engine.
 - **Credentials resolve gracefully.** Env vars override everything. Config file + keyring is the default. Missing credentials show a setup dialog — no panics.
+
+### HTML rendering: no web engine
+
+Most email today is HTML. Most email clients embed a full web engine (WebKit, Chromium, Gecko) to render it. Nevermail doesn't.
+
+HTML email is a surveillance vector. Tracking pixels, remote image loads, JavaScript, and CSS callbacks all phone home to tell senders when, where, and on what device you opened their message. An embedded browser makes all of that work by default. Turning it off becomes a game of whack-a-mole against an engine designed to fetch remote resources.
+
+Nevermail sidesteps this entirely. The rendering pipeline is:
+
+1. **ammonia** strips everything that isn't content — scripts, iframes, tracking pixels, remote images, event handlers, `<style>` blocks with external references
+2. **html2md** converts the surviving HTML structure into markdown (headings, lists, links, emphasis)
+3. **iced's markdown widget** renders that as native rich text
+
+The result is that you see the message. Formatted text, links, structure — all there. What you don't get is pixel-perfect newsletter layouts, and what senders don't get is a read receipt. That's the trade.
+
+For plain-text quoting and full-text search indexing, **html2text** provides a separate plain-text conversion path that also stays fully local.
 
 ## Keyboard shortcuts
 
