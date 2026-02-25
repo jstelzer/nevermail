@@ -1,10 +1,48 @@
 use cosmic::app::Task;
+use cosmic::dialog::file_chooser;
 use cosmic::widget::text_editor;
 
 use super::{AppModel, Message};
-use crate::core::smtp::{self, OutgoingEmail};
 use crate::config::SmtpConfig;
+use crate::core::models::AttachmentData;
+use crate::core::smtp::{self, OutgoingEmail};
 use crate::ui::compose_dialog::ComposeMode;
+
+/// Guess MIME type from file extension.
+fn mime_from_ext(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("gz" | "gzip") => "application/gzip",
+        Some("tar") => "application/x-tar",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("txt") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("css") => "text/css",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("odt") => "application/vnd.oasis.opendocument.text",
+        Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
+        Some("mp3") => "audio/mpeg",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
 
 impl AppModel {
     pub(super) fn handle_compose(&mut self, message: Message) -> Task<Message> {
@@ -20,6 +58,7 @@ impl AppModel {
                 self.compose_body = text_editor::Content::new();
                 self.compose_in_reply_to = None;
                 self.compose_references = None;
+                self.compose_attachments.clear();
                 self.compose_error = None;
                 self.is_sending = false;
                 self.show_compose_dialog = true;
@@ -42,13 +81,15 @@ impl AppModel {
                         };
 
                         let quoted = quote_body(&self.preview_body, &msg.from, &msg.date);
-                        self.compose_body = text_editor::Content::with_text(&format!("\n\n{quoted}"));
+                        self.compose_body =
+                            text_editor::Content::with_text(&format!("\n\n{quoted}"));
 
                         self.compose_in_reply_to = Some(msg.message_id.clone());
                         self.compose_references = Some(build_references(
                             msg.in_reply_to.as_deref(),
                             &msg.message_id,
                         ));
+                        self.compose_attachments.clear();
                         self.compose_error = None;
                         self.is_sending = false;
                         self.show_compose_dialog = true;
@@ -78,10 +119,12 @@ impl AppModel {
                             &msg.date,
                             &msg.subject,
                         );
-                        self.compose_body = text_editor::Content::with_text(&format!("\n\n{fwd}"));
+                        self.compose_body =
+                            text_editor::Content::with_text(&format!("\n\n{fwd}"));
 
                         self.compose_in_reply_to = None;
                         self.compose_references = None;
+                        self.compose_attachments = self.preview_attachments.clone();
                         self.compose_error = None;
                         self.is_sending = false;
                         self.show_compose_dialog = true;
@@ -100,6 +143,60 @@ impl AppModel {
             }
             Message::ComposeBodyAction(action) => {
                 self.compose_body.perform(action);
+            }
+
+            Message::ComposeAttach => {
+                return cosmic::task::future(async move {
+                    let dialog = file_chooser::open::Dialog::new().title("Attach files");
+                    match dialog.open_files().await {
+                        Ok(response) => {
+                            let mut attachments = Vec::new();
+                            for url in response.urls() {
+                                let path = match url.to_file_path() {
+                                    Ok(p) => p,
+                                    Err(_) => continue,
+                                };
+                                let data = match tokio::fs::read(&path).await {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        return Message::ComposeAttachLoaded(Err(format!(
+                                            "Failed to read {}: {e}",
+                                            path.display()
+                                        )));
+                                    }
+                                };
+                                let filename = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "attachment".into());
+                                let mime_type = mime_from_ext(&path).to_owned();
+                                attachments.push(AttachmentData {
+                                    filename,
+                                    mime_type,
+                                    data,
+                                });
+                            }
+                            Message::ComposeAttachLoaded(Ok(attachments))
+                        }
+                        Err(file_chooser::Error::Cancelled) => Message::Noop,
+                        Err(e) => {
+                            Message::ComposeAttachLoaded(Err(format!("File picker error: {e}")))
+                        }
+                    }
+                });
+            }
+
+            Message::ComposeAttachLoaded(Ok(files)) => {
+                self.compose_attachments.extend(files);
+            }
+            Message::ComposeAttachLoaded(Err(e)) => {
+                self.compose_error = Some(e);
+            }
+
+            Message::ComposeRemoveAttachment(i) => {
+                if i < self.compose_attachments.len() {
+                    self.compose_attachments.remove(i);
+                }
             }
 
             Message::ComposeSend => {
@@ -144,6 +241,7 @@ impl AppModel {
                     body: body_text,
                     in_reply_to: self.compose_in_reply_to.clone(),
                     references: self.compose_references.clone(),
+                    attachments: self.compose_attachments.clone(),
                 };
 
                 return cosmic::task::future(async move {
@@ -164,6 +262,7 @@ impl AppModel {
                 self.compose_body = text_editor::Content::new();
                 self.compose_in_reply_to = None;
                 self.compose_references = None;
+                self.compose_attachments.clear();
                 self.compose_error = None;
                 self.status_message = "Message sent".into();
             }

@@ -81,6 +81,7 @@ pub struct AppModel {
     pub(super) compose_body: text_editor::Content,
     pub(super) compose_in_reply_to: Option<String>,
     pub(super) compose_references: Option<String>,
+    pub(super) compose_attachments: Vec<AttachmentData>,
     pub(super) compose_error: Option<String>,
     pub(super) is_sending: bool,
 
@@ -146,6 +147,9 @@ pub enum Message {
     ComposeToChanged(String),
     ComposeSubjectChanged(String),
     ComposeBodyAction(text_editor::Action),
+    ComposeAttach,
+    ComposeAttachLoaded(Result<Vec<AttachmentData>, String>),
+    ComposeRemoveAttachment(usize),
     ComposeSend,
     ComposeCancel,
     SendComplete(Result<(), String>),
@@ -258,6 +262,7 @@ impl cosmic::Application for AppModel {
             compose_body: text_editor::Content::new(),
             compose_in_reply_to: None,
             compose_references: None,
+            compose_attachments: Vec::new(),
             compose_error: None,
             is_sending: false,
 
@@ -335,6 +340,7 @@ impl cosmic::Application for AppModel {
                 &self.compose_to,
                 &self.compose_subject,
                 &self.compose_body,
+                &self.compose_attachments,
                 self.compose_error.as_deref(),
                 self.is_sending,
             ));
@@ -509,6 +515,9 @@ impl cosmic::Application for AppModel {
             | Message::ComposeToChanged(_)
             | Message::ComposeSubjectChanged(_)
             | Message::ComposeBodyAction(_)
+            | Message::ComposeAttach
+            | Message::ComposeAttachLoaded(_)
+            | Message::ComposeRemoveAttachment(_)
             | Message::ComposeSend
             | Message::ComposeCancel
             | Message::SendComplete(_) => self.handle_compose(message),

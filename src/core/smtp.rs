@@ -1,8 +1,10 @@
-use lettre::message::header;
+use lettre::message::header::{self, ContentType};
+use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::config::SmtpConfig;
+use crate::core::models::AttachmentData;
 
 pub struct OutgoingEmail {
     pub from: String,
@@ -11,6 +13,7 @@ pub struct OutgoingEmail {
     pub body: String,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    pub attachments: Vec<AttachmentData>,
 }
 
 pub async fn send_email(config: &SmtpConfig, email: &OutgoingEmail) -> Result<(), String> {
@@ -48,9 +51,26 @@ pub async fn send_email(config: &SmtpConfig, email: &OutgoingEmail) -> Result<()
         builder = builder.header(header::References::from(refs.clone()));
     }
 
-    let message = builder
-        .body(email.body.clone())
-        .map_err(|e| format!("Failed to build message: {e}"))?;
+    let message = if email.attachments.is_empty() {
+        builder
+            .body(email.body.clone())
+            .map_err(|e| format!("Failed to build message: {e}"))?
+    } else {
+        let text_part = SinglePart::plain(email.body.clone());
+        let mut multipart = MultiPart::mixed().singlepart(text_part);
+        for att in &email.attachments {
+            let content_type: ContentType = att
+                .mime_type
+                .parse()
+                .unwrap_or(ContentType::TEXT_PLAIN);
+            let attachment = Attachment::new(att.filename.clone())
+                .body(att.data.clone(), content_type);
+            multipart = multipart.singlepart(attachment);
+        }
+        builder
+            .multipart(multipart)
+            .map_err(|e| format!("Failed to build message: {e}"))?
+    };
 
     let creds = Credentials::new(config.username.clone(), config.password.clone());
 

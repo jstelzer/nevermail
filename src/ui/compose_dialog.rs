@@ -4,12 +4,23 @@ use cosmic::widget::text_editor;
 use cosmic::Element;
 
 use crate::app::Message;
+use crate::core::models::AttachmentData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComposeMode {
     New,
     Reply,
     Forward,
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -20,6 +31,7 @@ pub fn view<'a>(
     to: &'a str,
     subject: &'a str,
     body: &'a text_editor::Content,
+    attachments: &[AttachmentData],
     error: Option<&'a str>,
     is_sending: bool,
 ) -> Element<'a, Message> {
@@ -68,6 +80,27 @@ pub fn view<'a>(
                 .on_action(Message::ComposeBodyAction)
                 .height(Length::Fixed(300.0)),
         );
+
+    // Attachment section
+    let mut attach_col = widget::column().spacing(6);
+    attach_col = attach_col.push(
+        widget::button::standard("Attach files").on_press(Message::ComposeAttach),
+    );
+    if !attachments.is_empty() {
+        for (i, att) in attachments.iter().enumerate() {
+            let label = format!("{} ({})", att.filename, format_size(att.data.len()));
+            let row = widget::row()
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(widget::text::body(label))
+                .push(
+                    widget::button::destructive("Remove")
+                        .on_press(Message::ComposeRemoveAttachment(i)),
+                );
+            attach_col = attach_col.push(row);
+        }
+    }
+    controls = controls.push(attach_col);
 
     let send_label = if is_sending { "Sending..." } else { "Send" };
     let send_btn = if is_sending {

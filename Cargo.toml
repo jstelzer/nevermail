@@ -12,6 +12,7 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
     "winit",
     "wgpu",
     "markdown",
+    "xdg-portal",
 ] }
 
 # Mail engine
