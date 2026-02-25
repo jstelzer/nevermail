@@ -11,6 +11,7 @@ impl AppModel {
         match message {
             Message::ViewBody(index) => {
                 self.selected_message = Some(index);
+                self.pending_body = None;
 
                 if let Some(msg) = self.messages.get(index) {
                     let envelope_hash = msg.envelope_hash;
@@ -47,9 +48,8 @@ impl AppModel {
                                 }
                                 Message::BodyLoaded(result)
                             } else {
-                                Message::BodyLoaded(Err(
-                                    "Not connected".to_string()
-                                ))
+                                // Session not ready yet — signal deferral
+                                Message::BodyDeferred
                             }
                         });
                     }
@@ -64,6 +64,18 @@ impl AppModel {
                             )
                         });
                     }
+
+                    // No cache, no session — defer until connected
+                    self.pending_body = Some(index);
+                    self.status_message = "Connecting...".into();
+                }
+            }
+
+            Message::BodyDeferred => {
+                // Cache missed and session wasn't ready — defer until connected
+                if let Some(index) = self.selected_message {
+                    self.pending_body = Some(index);
+                    self.status_message = "Connecting...".into();
                 }
             }
 
@@ -105,6 +117,16 @@ impl AppModel {
                 self.status_message = "Ready".into();
             }
             Message::BodyLoaded(Err(e)) => {
+                // If still syncing, melib's store may not have the envelope yet.
+                // Defer the fetch instead of showing an error.
+                if self.is_busy() {
+                    if let Some(index) = self.selected_message {
+                        log::debug!("Body fetch deferred (still syncing): {}", e);
+                        self.pending_body = Some(index);
+                        self.status_message = "Syncing...".into();
+                        return Task::none();
+                    }
+                }
                 let msg = format!("Failed to load message body: {}", e);
                 self.preview_markdown = markdown::parse(&msg).collect();
                 self.preview_body = msg;

@@ -108,6 +108,9 @@ pub struct AppModel {
     // DnD state
     pub(super) folder_drag_target: Option<usize>,
 
+    /// Body view deferred until IMAP session is ready
+    pub(super) pending_body: Option<usize>,
+
     // Pane layout
     pub(super) panes: pane_grid::State<PaneKind>,
 }
@@ -119,6 +122,7 @@ pub enum Message {
     SelectFolder(usize),
 
     ViewBody(usize),
+    BodyDeferred,
     BodyLoaded(Result<(String, String, Vec<AttachmentData>), String>),
     LinkClicked(markdown::Url),
     CopyBody,
@@ -323,6 +327,7 @@ impl cosmic::Application for AppModel {
             setup_error: None,
 
             folder_drag_target: None,
+            pending_body: None,
 
             panes,
         };
@@ -618,6 +623,7 @@ impl cosmic::Application for AppModel {
 
             // Body / attachment viewing
             Message::ViewBody(_)
+            | Message::BodyDeferred
             | Message::BodyLoaded(_)
             | Message::LinkClicked(_)
             | Message::CopyBody

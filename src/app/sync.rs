@@ -73,7 +73,9 @@ impl AppModel {
                 }
 
                 let cache = self.cache.clone();
-                return cosmic::task::future(async move {
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+
+                tasks.push(cosmic::task::future(async move {
                     let result = session.fetch_folders().await;
                     if let (Some(cache), Ok(ref folders)) = (&cache, &result) {
                         if let Err(e) = cache.save_folders(folders.clone()).await {
@@ -81,7 +83,14 @@ impl AppModel {
                         }
                     }
                     Message::SyncFoldersComplete(result)
-                });
+                }));
+
+                // Flush any body view that was deferred while disconnected
+                if let Some(index) = self.pending_body.take() {
+                    tasks.push(self.dispatch(Message::ViewBody(index)));
+                }
+
+                return cosmic::task::batch(tasks);
             }
             Message::Connected(Err(e)) => {
                 self.conn_state = ConnectionState::Error(e.clone());
@@ -161,23 +170,38 @@ impl AppModel {
 
             Message::SyncMessagesComplete(Ok(())) => {
                 self.conn_state = ConnectionState::Connected;
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+
                 if let Some(idx) = self.selected_folder {
                     if let Some(folder) = self.folders.get(idx) {
                         let mailbox_hash = folder.mailbox_hash;
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
                             self.messages_offset = 0;
-                            return cosmic::task::future(async move {
+                            tasks.push(cosmic::task::future(async move {
                                 Message::CachedMessagesLoaded(
                                     cache
                                         .load_messages(mailbox_hash, DEFAULT_PAGE_SIZE, 0)
                                         .await,
                                 )
-                            });
+                            }));
                         }
                     }
                 }
-                self.status_message = format!("{} messages (synced)", self.messages.len());
+
+                // Flush any body view deferred while sync was in progress
+                if let Some(index) = self.pending_body.take() {
+                    tasks.push(self.dispatch(Message::ViewBody(index)));
+                }
+
+                if tasks.is_empty() {
+                    self.status_message =
+                        format!("{} messages (synced)", self.messages.len());
+                }
+
+                if !tasks.is_empty() {
+                    return cosmic::task::batch(tasks);
+                }
             }
             Message::SyncMessagesComplete(Err(e)) => {
                 self.conn_state = ConnectionState::Connected;
