@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.neverlight.email</id>
+
+  <name>Nevermail</name>
+  <summary>COSMIC desktop email client</summary>
+  <description>
+    <p>
+      A desktop email client built with libcosmic for the COSMIC desktop environment.
+      Connects to standard IMAP servers with full-text search, threaded conversations,
+      and drag-and-drop message management.
+    </p>
+  </description>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <launchable type="desktop-id">com.neverlight.email.desktop</launchable>
+
+  <url type="homepage">https://github.com/jstelzer/nevermail</url>
+  <url type="bugtracker">https://github.com/jstelzer/nevermail/issues</url>
+
+  <developer id="com.neverlight">
+    <name>Neverlight</name>
+  </developer>
+
+  <provides>
+    <binary>nevermail</binary>
+  </provides>
+
+  <requires>
+    <display_length compare="ge">600</display_length>
+  </requires>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <categories>
+    <category>Network</category>
+    <category>Email</category>
+  </categories>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-02-25">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

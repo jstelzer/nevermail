@@ -14,14 +14,21 @@ use cosmic::app::{Core, Task};
 use cosmic::iced::keyboard;
 use cosmic::iced::{Event, Length, Subscription};
 use cosmic::widget;
-use cosmic::widget::{image, markdown, text_editor};
+use cosmic::widget::{image, markdown, pane_grid, text_editor};
 use cosmic::Element;
 
-use crate::config::{Config, ConfigNeedsInput};
+use crate::config::{Config, ConfigNeedsInput, LayoutConfig};
 use crate::core::imap::ImapSession;
 use crate::core::models::{AttachmentData, DraggedFiles, Folder, MessageSummary};
 use crate::core::store::CacheHandle;
 use crate::ui::compose_dialog::ComposeMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneKind {
+    Sidebar,
+    MessageList,
+    MessageView,
+}
 
 const APP_ID: &str = "com.neverlight.email";
 
@@ -100,6 +107,9 @@ pub struct AppModel {
 
     // DnD state
     pub(super) folder_drag_target: Option<usize>,
+
+    // Pane layout
+    pub(super) panes: pane_grid::State<PaneKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +191,8 @@ pub enum Message {
     FolderDragEnter(usize),
     FolderDragLeave,
 
+    PaneResized(pane_grid::ResizeEvent),
+
     ForceReconnect,
     Refresh,
     Noop,
@@ -246,6 +258,20 @@ impl cosmic::Application for AppModel {
             }
         };
 
+        let layout = LayoutConfig::load();
+        let pane_config = pane_grid::Configuration::Split {
+            axis: pane_grid::Axis::Vertical,
+            ratio: layout.sidebar_ratio,
+            a: Box::new(pane_grid::Configuration::Pane(PaneKind::Sidebar)),
+            b: Box::new(pane_grid::Configuration::Split {
+                axis: pane_grid::Axis::Vertical,
+                ratio: layout.list_ratio,
+                a: Box::new(pane_grid::Configuration::Pane(PaneKind::MessageList)),
+                b: Box::new(pane_grid::Configuration::Pane(PaneKind::MessageView)),
+            }),
+        };
+        let panes = pane_grid::State::with_configuration(pane_config);
+
         let mut app = AppModel {
             core,
             config: None,
@@ -297,6 +323,8 @@ impl cosmic::Application for AppModel {
             setup_error: None,
 
             folder_drag_target: None,
+
+            panes,
         };
 
         let title_task = app.set_window_title("Nevermail".into());
@@ -477,49 +505,41 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let sidebar = crate::ui::sidebar::view(
-            &self.folders,
-            self.selected_folder,
-            &self.conn_state,
-            self.folder_drag_target,
-        );
-        let message_list = crate::ui::message_list::view(
-            &self.messages,
-            &self.visible_indices,
-            self.selected_message,
-            self.has_more_messages && !self.search_active,
-            &self.collapsed_threads,
-            &self.thread_sizes,
-            self.search_active,
-            &self.search_query,
-        );
-        let selected_msg = self.selected_message.and_then(|i| {
-            self.messages.get(i).map(|msg| (i, msg))
-        });
-        let message_view = crate::ui::message_view::view(
-            &self.preview_markdown,
-            selected_msg,
-            &self.preview_attachments,
-            &self.preview_image_handles,
-        );
-
-        let main_content = widget::row()
-            .push(
-                widget::container(sidebar)
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill),
-            )
-            .push(
-                widget::container(message_list)
-                    .width(Length::FillPortion(2))
-                    .height(Length::Fill),
-            )
-            .push(
-                widget::container(message_view)
-                    .width(Length::FillPortion(3))
-                    .height(Length::Fill),
-            )
-            .height(Length::Fill);
+        let main_content = widget::PaneGrid::new(&self.panes, |_pane, kind, _is_maximized| {
+            let body: Element<'_, Self::Message> = match kind {
+                PaneKind::Sidebar => crate::ui::sidebar::view(
+                    &self.folders,
+                    self.selected_folder,
+                    &self.conn_state,
+                    self.folder_drag_target,
+                ),
+                PaneKind::MessageList => crate::ui::message_list::view(
+                    &self.messages,
+                    &self.visible_indices,
+                    self.selected_message,
+                    self.has_more_messages && !self.search_active,
+                    &self.collapsed_threads,
+                    &self.thread_sizes,
+                    self.search_active,
+                    &self.search_query,
+                ),
+                PaneKind::MessageView => {
+                    let selected_msg = self.selected_message.and_then(|i| {
+                        self.messages.get(i).map(|msg| (i, msg))
+                    });
+                    crate::ui::message_view::view(
+                        &self.preview_markdown,
+                        selected_msg,
+                        &self.preview_attachments,
+                        &self.preview_image_handles,
+                    )
+                }
+            };
+            pane_grid::Content::new(body)
+        })
+        .on_resize(10.0, Message::PaneResized)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         let status_bar = widget::container(widget::text::caption(&self.status_message))
             .padding([4, 8])
@@ -631,6 +651,12 @@ impl cosmic::Application for AppModel {
             // IMAP watch events
             Message::ImapEvent(_) => self.handle_watch(message),
 
+            // Pane layout
+            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+                self.panes.resize(split, ratio);
+                self.save_layout();
+                Task::none()
+            }
             Message::Noop => Task::none(),
         }
     }
@@ -651,5 +677,32 @@ impl AppModel {
     /// Dispatch a message through the update loop (for recursive calls from handlers).
     pub(super) fn dispatch(&mut self, message: Message) -> Task<Message> {
         <Self as cosmic::Application>::update(self, message)
+    }
+
+    /// Extract current split ratios from pane_grid layout tree and persist.
+    fn save_layout(&self) {
+        fn extract_ratios(node: &pane_grid::Node) -> (f32, f32) {
+            match node {
+                pane_grid::Node::Split { ratio, a, b, .. } => {
+                    let sidebar_ratio = *ratio;
+                    // Inner split is in the 'b' branch
+                    let list_ratio = match b.as_ref() {
+                        pane_grid::Node::Split { ratio, .. } => *ratio,
+                        _ => 0.40,
+                    };
+                    // If 'a' is also a split (shouldn't be, but be safe), recurse
+                    let _ = a;
+                    (sidebar_ratio, list_ratio)
+                }
+                _ => (0.15, 0.40),
+            }
+        }
+
+        let (sidebar_ratio, list_ratio) = extract_ratios(self.panes.layout());
+        let layout = LayoutConfig {
+            sidebar_ratio,
+            list_ratio,
+        };
+        layout.save();
     }
 }

@@ -79,11 +79,58 @@ pub enum ConfigNeedsInput {
     },
 }
 
-fn config_path() -> PathBuf {
+fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nevermail")
-        .join("config.json")
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+/// Persisted pane layout ratios.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutConfig {
+    /// Ratio of the outer split (sidebar vs rest). Default ~0.15.
+    pub sidebar_ratio: f32,
+    /// Ratio of the inner split (message list vs message view). Default ~0.40.
+    pub list_ratio: f32,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            sidebar_ratio: 0.15,
+            list_ratio: 0.40,
+        }
+    }
+}
+
+impl LayoutConfig {
+    pub fn load() -> Self {
+        let path = config_dir().join("layout.json");
+        if let Ok(data) = fs::read_to_string(&path) {
+            if let Ok(cfg) = serde_json::from_str::<LayoutConfig>(&data) {
+                // Clamp to sane range
+                return LayoutConfig {
+                    sidebar_ratio: cfg.sidebar_ratio.clamp(0.05, 0.50),
+                    list_ratio: cfg.list_ratio.clamp(0.15, 0.85),
+                };
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save(&self) {
+        let path = config_dir().join("layout.json");
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(data) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(&path, data);
+        }
+    }
 }
 
 impl FileConfig {

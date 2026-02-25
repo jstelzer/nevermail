@@ -2,7 +2,7 @@
 name = "nevermail"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0/MIT"
+license = "GPL-3.0-or-later"
 description = "A COSMIC desktop email client"
 
 [dependencies]

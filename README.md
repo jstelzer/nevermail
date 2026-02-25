@@ -62,7 +62,7 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 - [x] **Phase 4**: Attachments/Download
 - [x] **Phase 5**: Support multiple from addrs
 - [x] **Phase 6**: Background task / notifications 
-- [x] **Phase 7**: Figure out html rendering and consider adding https://g ithub.com/Mrmayman/frostmark  / FTS
+- [x] **Phase 7**: Figure out html rendering and consider adding https://github.com/Mrmayman/frostmark  / FTS
 - [x] **Phase 8**: Drag & Drop. Attachments.
 - [ ] **Phase 9**: Allow smtp creds to be distinct from imap
 - [ ] **Phase 10**: OAuth2, multiple accounts
@@ -145,4 +145,4 @@ export NEVERMAIL_STARTTLS=false
 
 ## License
 
-Apache-2.0/MIT
+GPL-3.0-or-later

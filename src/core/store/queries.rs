@@ -50,13 +50,16 @@ pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(
         .unchecked_transaction()
         .map_err(|e| format!("Cache tx error: {e}"))?;
 
-    tx.execute("DELETE FROM folders", [])
-        .map_err(|e| format!("Cache delete error: {e}"))?;
-
+    // Upsert each folder — updates counts if already present, inserts if new.
     let mut stmt = tx
         .prepare(
             "INSERT INTO folders (path, name, mailbox_hash, unread_count, total_count)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET
+                 name = excluded.name,
+                 mailbox_hash = excluded.mailbox_hash,
+                 unread_count = excluded.unread_count,
+                 total_count = excluded.total_count",
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
@@ -71,6 +74,46 @@ pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(
         .map_err(|e| format!("Cache insert error: {e}"))?;
     }
     drop(stmt);
+
+    // Remove folders that no longer exist on the server.
+    // Cascade: delete orphaned messages and their attachments first.
+    let server_hashes: Vec<i64> = folders.iter().map(|f| f.mailbox_hash as i64).collect();
+    if server_hashes.is_empty() {
+        // Server returned no folders — clear everything
+        tx.execute("DELETE FROM attachments", [])
+            .map_err(|e| format!("Cache cascade error: {e}"))?;
+        tx.execute("DELETE FROM messages", [])
+            .map_err(|e| format!("Cache cascade error: {e}"))?;
+        tx.execute("DELETE FROM folders", [])
+            .map_err(|e| format!("Cache delete error: {e}"))?;
+    } else {
+        let placeholders: String = (0..server_hashes.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let sql = format!(
+            "DELETE FROM attachments WHERE envelope_hash IN (
+                SELECT envelope_hash FROM messages WHERE mailbox_hash NOT IN ({placeholders})
+            )"
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            server_hashes.iter().map(|h| h as &dyn rusqlite::types::ToSql).collect();
+        tx.execute(&sql, params.as_slice())
+            .map_err(|e| format!("Cache cascade error: {e}"))?;
+
+        let sql = format!(
+            "DELETE FROM messages WHERE mailbox_hash NOT IN ({placeholders})"
+        );
+        tx.execute(&sql, params.as_slice())
+            .map_err(|e| format!("Cache cascade error: {e}"))?;
+
+        let sql = format!(
+            "DELETE FROM folders WHERE mailbox_hash NOT IN ({placeholders})"
+        );
+        tx.execute(&sql, params.as_slice())
+            .map_err(|e| format!("Cache delete error: {e}"))?;
+    }
 
     tx.commit()
         .map_err(|e| format!("Cache commit error: {e}"))?;
