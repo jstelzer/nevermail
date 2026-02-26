@@ -50,6 +50,9 @@ pub(super) fn run_migrations(conn: &Connection) {
         "ALTER TABLE messages ADD COLUMN body_markdown TEXT",
         "ALTER TABLE messages ADD COLUMN reply_to TEXT",
         "ALTER TABLE messages ADD COLUMN recipient TEXT",
+        // Multi-account support
+        "ALTER TABLE folders ADD COLUMN account_id TEXT DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN account_id TEXT DEFAULT ''",
     ];
     for sql in &alters {
         // "duplicate column name" is the expected error when already migrated
@@ -62,11 +65,15 @@ pub(super) fn run_migrations(conn: &Connection) {
     }
 
     // Indexes (idempotent via IF NOT EXISTS)
-    if let Err(e) = conn.execute(
+    let indexes = [
         "CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)",
-        [],
-    ) {
-        log::warn!("Index creation failed: {}", e);
+        "CREATE INDEX IF NOT EXISTS idx_folders_account ON folders(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_account_mailbox ON messages(account_id, mailbox_hash, timestamp DESC)",
+    ];
+    for sql in &indexes {
+        if let Err(e) = conn.execute(sql, []) {
+            log::warn!("Index creation failed: {}", e);
+        }
     }
 
     // FTS5 full-text search index (external content, keyed to messages rowid).

@@ -149,8 +149,7 @@ export NEVERMAIL_STARTTLS=false
 
 ## Not yet supported
 
-- Multiple accounts
-- OAuth2 (see below)
+Are - OAuth2 (see below)
 
 ### A note on OAuth2 and Gmail
 

@@ -5,18 +5,22 @@ use crate::core::models::{AttachmentData, Folder, MessageSummary};
 #[allow(clippy::type_complexity)]
 pub(super) enum CacheCmd {
     SaveFolders {
+        account_id: String,
         folders: Vec<Folder>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     LoadFolders {
+        account_id: String,
         reply: oneshot::Sender<Result<Vec<Folder>, String>>,
     },
     SaveMessages {
+        account_id: String,
         mailbox_hash: u64,
         messages: Vec<MessageSummary>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     LoadMessages {
+        account_id: String,
         mailbox_hash: u64,
         limit: u32,
         offset: u32,
@@ -56,5 +60,9 @@ pub(super) enum CacheCmd {
     Search {
         query: String,
         reply: oneshot::Sender<Result<Vec<MessageSummary>, String>>,
+    },
+    RemoveAccount {
+        account_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }

@@ -63,8 +63,10 @@ impl AppModel {
                     self.search_focused = false;
                     self.search_query.clear();
                     // Restore previous folder view
-                    if let Some(idx) = self.selected_folder {
-                        return self.dispatch(Message::SelectFolder(idx));
+                    if let Some(acct_idx) = self.active_account {
+                        if let Some(folder_idx) = self.selected_folder {
+                            return self.dispatch(Message::SelectFolder(acct_idx, folder_idx));
+                        }
                     }
                 } else {
                     // Not searching — Escape cancels compose dialog

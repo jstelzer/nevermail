@@ -50,30 +50,32 @@ impl CacheHandle {
 
     // -- async methods -------------------------------------------------------
 
-    pub async fn save_folders(&self, folders: Vec<Folder>) -> Result<(), String> {
+    pub async fn save_folders(&self, account_id: String, folders: Vec<Folder>) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(CacheCmd::SaveFolders { folders, reply })
+            .send(CacheCmd::SaveFolders { account_id, folders, reply })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
-    pub async fn load_folders(&self) -> Result<Vec<Folder>, String> {
+    pub async fn load_folders(&self, account_id: String) -> Result<Vec<Folder>, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(CacheCmd::LoadFolders { reply })
+            .send(CacheCmd::LoadFolders { account_id, reply })
             .map_err(|_| "Cache unavailable".to_string())?;
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
     pub async fn save_messages(
         &self,
+        account_id: String,
         mailbox_hash: u64,
         messages: Vec<MessageSummary>,
     ) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::SaveMessages {
+                account_id,
                 mailbox_hash,
                 messages,
                 reply,
@@ -84,6 +86,7 @@ impl CacheHandle {
 
     pub async fn load_messages(
         &self,
+        account_id: String,
         mailbox_hash: u64,
         limit: u32,
         offset: u32,
@@ -91,6 +94,7 @@ impl CacheHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CacheCmd::LoadMessages {
+                account_id,
                 mailbox_hash,
                 limit,
                 offset,
@@ -194,6 +198,15 @@ impl CacheHandle {
         rx.await.map_err(|_| "Cache unavailable".to_string())?
     }
 
+    /// Remove all cached data for an account (folders, messages, attachments).
+    pub async fn remove_account(&self, account_id: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CacheCmd::RemoveAccount { account_id, reply })
+            .map_err(|_| "Cache unavailable".to_string())?;
+        rx.await.map_err(|_| "Cache unavailable".to_string())?
+    }
+
     /// Full-text search across all folders.
     pub async fn search(&self, query: String) -> Result<Vec<MessageSummary>, String> {
         let (reply, rx) = oneshot::channel();
@@ -209,27 +222,29 @@ impl CacheHandle {
 fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            CacheCmd::SaveFolders { folders, reply } => {
-                let _ = reply.send(queries::do_save_folders(&conn, &folders));
+            CacheCmd::SaveFolders { account_id, folders, reply } => {
+                let _ = reply.send(queries::do_save_folders(&conn, &account_id, &folders));
             }
-            CacheCmd::LoadFolders { reply } => {
-                let _ = reply.send(queries::do_load_folders(&conn));
+            CacheCmd::LoadFolders { account_id, reply } => {
+                let _ = reply.send(queries::do_load_folders(&conn, &account_id));
             }
             CacheCmd::SaveMessages {
+                account_id,
                 mailbox_hash,
                 messages,
                 reply,
             } => {
-                let _ = reply.send(queries::do_save_messages(&conn, mailbox_hash, &messages));
+                let _ = reply.send(queries::do_save_messages(&conn, &account_id, mailbox_hash, &messages));
             }
             CacheCmd::LoadMessages {
+                account_id,
                 mailbox_hash,
                 limit,
                 offset,
                 reply,
             } => {
                 let _ =
-                    reply.send(queries::do_load_messages(&conn, mailbox_hash, limit, offset));
+                    reply.send(queries::do_load_messages(&conn, &account_id, mailbox_hash, limit, offset));
             }
             CacheCmd::LoadBody {
                 envelope_hash,
@@ -287,6 +302,9 @@ fn run_loop(conn: Connection, mut rx: mpsc::UnboundedReceiver<CacheCmd>) {
             }
             CacheCmd::Search { query, reply } => {
                 let _ = reply.send(queries::do_search(&conn, &query));
+            }
+            CacheCmd::RemoveAccount { account_id, reply } => {
+                let _ = reply.send(queries::do_remove_account(&conn, &account_id));
             }
         }
     }

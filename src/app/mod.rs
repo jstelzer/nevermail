@@ -17,7 +17,7 @@ use cosmic::widget;
 use cosmic::widget::{image, markdown, pane_grid, text_editor};
 use cosmic::Element;
 
-use crate::config::{Config, ConfigNeedsInput, LayoutConfig};
+use crate::config::{AccountConfig, AccountId, ConfigNeedsInput, LayoutConfig};
 use crate::core::imap::ImapSession;
 use crate::core::models::{AttachmentData, DraggedFiles, Folder, MessageSummary};
 use crate::core::store::CacheHandle;
@@ -41,14 +41,52 @@ pub enum ConnectionState {
     Error(String),
 }
 
+// ---------------------------------------------------------------------------
+// Per-account state
+// ---------------------------------------------------------------------------
+
+pub struct AccountState {
+    pub config: AccountConfig,
+    pub session: Option<Arc<ImapSession>>,
+    pub conn_state: ConnectionState,
+    pub folders: Vec<Folder>,
+    pub folder_map: HashMap<String, u64>,
+    pub collapsed: bool,
+}
+
+impl AccountState {
+    pub fn new(config: AccountConfig) -> Self {
+        AccountState {
+            config,
+            session: None,
+            conn_state: ConnectionState::Disconnected,
+            folders: Vec::new(),
+            folder_map: HashMap::new(),
+            collapsed: false,
+        }
+    }
+
+    pub fn rebuild_folder_map(&mut self) {
+        self.folder_map.clear();
+        for f in &self.folders {
+            self.folder_map.insert(f.path.clone(), f.mailbox_hash);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AppModel
+// ---------------------------------------------------------------------------
+
 pub struct AppModel {
     core: Core,
-    pub(super) config: Option<Config>,
 
-    pub(super) session: Option<Arc<ImapSession>>,
+    // Multi-account state
+    pub(super) accounts: Vec<AccountState>,
+    pub(super) active_account: Option<usize>,
+
     pub(super) cache: Option<CacheHandle>,
 
-    pub(super) folders: Vec<Folder>,
     pub(super) selected_folder: Option<usize>,
 
     pub(super) messages: Vec<MessageSummary>,
@@ -61,9 +99,6 @@ pub struct AppModel {
     pub(super) preview_attachments: Vec<AttachmentData>,
     pub(super) preview_image_handles: Vec<Option<image::Handle>>,
 
-    /// Map folder paths (e.g. "Trash", "Archive") to mailbox hashes
-    pub(super) folder_map: HashMap<String, u64>,
-
     /// Thread IDs that are currently collapsed (children hidden)
     pub(super) collapsed_threads: HashSet<u64>,
     /// Maps visible row positions → real indices into `messages`
@@ -71,7 +106,6 @@ pub struct AppModel {
     /// Total messages per thread_id (for collapse indicators)
     pub(super) thread_sizes: HashMap<u64, usize>,
 
-    pub(super) conn_state: ConnectionState,
     pub(super) status_message: String,
 
     // Search state
@@ -82,6 +116,7 @@ pub struct AppModel {
     // Compose dialog state
     pub(super) show_compose_dialog: bool,
     pub(super) compose_mode: ComposeMode,
+    pub(super) compose_account: usize,
     pub(super) compose_from: usize,
     pub(super) compose_to: String,
     pub(super) compose_subject: String,
@@ -92,10 +127,14 @@ pub struct AppModel {
     pub(super) compose_error: Option<String>,
     pub(super) compose_drag_hover: bool,
     pub(super) is_sending: bool,
+    // Cached for dialog() lifetime (updated when compose_account changes)
+    pub(super) compose_account_labels: Vec<String>,
+    pub(super) compose_cached_from: Vec<String>,
 
     // Setup dialog state
     pub(super) show_setup_dialog: bool,
     pub(super) password_only_mode: bool,
+    pub(super) setup_label: String,
     pub(super) setup_server: String,
     pub(super) setup_port: String,
     pub(super) setup_username: String,
@@ -104,6 +143,13 @@ pub struct AppModel {
     pub(super) setup_password_visible: bool,
     pub(super) setup_email_addresses: String,
     pub(super) setup_error: Option<String>,
+    pub(super) setup_editing_account: Option<AccountId>,
+    // SMTP override fields
+    pub(super) setup_smtp_server: String,
+    pub(super) setup_smtp_port: String,
+    pub(super) setup_smtp_username: String,
+    pub(super) setup_smtp_password: String,
+    pub(super) setup_smtp_starttls: bool,
 
     // DnD state
     pub(super) folder_drag_target: Option<usize>,
@@ -117,9 +163,12 @@ pub struct AppModel {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Connected(Result<Arc<ImapSession>, String>),
+    AccountConnected {
+        account_id: AccountId,
+        result: Result<Arc<ImapSession>, String>,
+    },
 
-    SelectFolder(usize),
+    SelectFolder(usize, usize), // (account_idx, folder_idx)
 
     ViewBody(usize),
     BodyDeferred,
@@ -131,9 +180,15 @@ pub enum Message {
     SaveAttachmentComplete(Result<String, String>),
 
     // Cache-first messages
-    CachedFoldersLoaded(Result<Vec<Folder>, String>),
+    CachedFoldersLoaded {
+        account_id: AccountId,
+        result: Result<Vec<Folder>, String>,
+    },
     CachedMessagesLoaded(Result<Vec<MessageSummary>, String>),
-    SyncFoldersComplete(Result<Vec<Folder>, String>),
+    SyncFoldersComplete {
+        account_id: AccountId,
+        result: Result<Vec<Folder>, String>,
+    },
     SyncMessagesComplete(Result<(), String>),
     LoadMoreMessages,
 
@@ -161,6 +216,7 @@ pub enum Message {
     ComposeNew,
     ComposeReply,
     ComposeForward,
+    ComposeAccountChanged(usize),
     ComposeFromChanged(usize),
     ComposeToChanged(String),
     ComposeSubjectChanged(String),
@@ -177,7 +233,7 @@ pub enum Message {
     ComposeCancel,
     SendComplete(Result<(), String>),
 
-    ImapEvent(ImapWatchEvent),
+    ImapEvent(AccountId, ImapWatchEvent),
 
     // Search
     SearchActivate,
@@ -197,11 +253,18 @@ pub enum Message {
 
     PaneResized(pane_grid::ResizeEvent),
 
-    ForceReconnect,
+    ForceReconnect(AccountId),
     Refresh,
     Noop,
 
+    // Account management
+    AccountAdd,
+    AccountEdit(AccountId),
+    AccountRemove(AccountId),
+    ToggleAccountCollapse(usize),
+
     // Setup dialog messages
+    SetupLabelChanged(String),
     SetupServerChanged(String),
     SetupPortChanged(String),
     SetupUsernameChanged(String),
@@ -209,6 +272,11 @@ pub enum Message {
     SetupStarttlsToggled(bool),
     SetupPasswordVisibilityToggled,
     SetupEmailAddressesChanged(String),
+    SetupSmtpServerChanged(String),
+    SetupSmtpPortChanged(String),
+    SetupSmtpUsernameChanged(String),
+    SetupSmtpPasswordChanged(String),
+    SetupSmtpStarttlsToggled(bool),
     SetupSubmit,
     SetupCancel,
 }
@@ -278,10 +346,9 @@ impl cosmic::Application for AppModel {
 
         let mut app = AppModel {
             core,
-            config: None,
-            session: None,
+            accounts: Vec::new(),
+            active_account: None,
             cache: cache.clone(),
-            folders: Vec::new(),
             selected_folder: None,
             messages: Vec::new(),
             selected_message: None,
@@ -291,11 +358,9 @@ impl cosmic::Application for AppModel {
             preview_markdown: Vec::new(),
             preview_attachments: Vec::new(),
             preview_image_handles: Vec::new(),
-            folder_map: HashMap::new(),
             collapsed_threads: HashSet::new(),
             visible_indices: Vec::new(),
             thread_sizes: HashMap::new(),
-            conn_state: ConnectionState::Disconnected,
             status_message: "Starting up...".into(),
 
             search_active: false,
@@ -304,6 +369,7 @@ impl cosmic::Application for AppModel {
 
             show_compose_dialog: false,
             compose_mode: ComposeMode::New,
+            compose_account: 0,
             compose_from: 0,
             compose_to: String::new(),
             compose_subject: String::new(),
@@ -314,9 +380,12 @@ impl cosmic::Application for AppModel {
             compose_error: None,
             compose_drag_hover: false,
             is_sending: false,
+            compose_account_labels: Vec::new(),
+            compose_cached_from: Vec::new(),
 
             show_setup_dialog: false,
             password_only_mode: false,
+            setup_label: String::new(),
             setup_server: String::new(),
             setup_port: "993".into(),
             setup_username: String::new(),
@@ -325,6 +394,12 @@ impl cosmic::Application for AppModel {
             setup_password_visible: false,
             setup_email_addresses: String::new(),
             setup_error: None,
+            setup_editing_account: None,
+            setup_smtp_server: String::new(),
+            setup_smtp_port: "587".into(),
+            setup_smtp_username: String::new(),
+            setup_smtp_password: String::new(),
+            setup_smtp_starttls: true,
 
             folder_drag_target: None,
             pending_body: None,
@@ -335,21 +410,37 @@ impl cosmic::Application for AppModel {
         let title_task = app.set_window_title("Nevermail".into());
         let mut tasks = vec![title_task];
 
-        // Load cached folders regardless of config state
-        if let Some(cache) = cache.clone() {
-            tasks.push(cosmic::task::future(async move {
-                Message::CachedFoldersLoaded(cache.load_folders().await)
-            }));
-        }
-
         // Resolve config: env → file+keyring → show dialog
-        match Config::resolve() {
-            Ok(config) => {
-                app.config = Some(config.clone());
-                app.conn_state = ConnectionState::Connecting;
-                tasks.push(cosmic::task::future(async move {
-                    Message::Connected(ImapSession::connect(config).await)
-                }));
+        match crate::config::Config::resolve_all_accounts() {
+            Ok(account_configs) => {
+                for ac in account_configs {
+                    let account_id = ac.id.clone();
+                    let imap_config = ac.to_imap_config();
+                    let mut acct = AccountState::new(ac);
+                    acct.conn_state = ConnectionState::Connecting;
+                    app.accounts.push(acct);
+
+                    // Load cached folders for this account
+                    if let Some(cache) = cache.clone() {
+                        let aid = account_id.clone();
+                        tasks.push(cosmic::task::future(async move {
+                            let result = cache.load_folders(aid.clone()).await;
+                            Message::CachedFoldersLoaded { account_id: aid, result }
+                        }));
+                    }
+
+                    // Start connecting
+                    let aid = account_id.clone();
+                    tasks.push(cosmic::task::future(async move {
+                        let result = ImapSession::connect(imap_config).await;
+                        Message::AccountConnected { account_id: aid, result }
+                    }));
+                }
+                if app.accounts.is_empty() {
+                    app.show_setup_dialog = true;
+                    app.password_only_mode = false;
+                    app.status_message = "Setup required — enter your account details".into();
+                }
             }
             Err(ConfigNeedsInput::FullSetup) => {
                 app.show_setup_dialog = true;
@@ -382,14 +473,11 @@ impl cosmic::Application for AppModel {
             return Some(self.setup_dialog());
         }
         if self.show_compose_dialog {
-            let addrs = self
-                .config
-                .as_ref()
-                .map(|c| c.email_addresses.as_slice())
-                .unwrap_or(&[]);
             return Some(crate::ui::compose_dialog::view(
                 &self.compose_mode,
-                addrs,
+                &self.compose_account_labels,
+                self.compose_account,
+                &self.compose_cached_from,
                 self.compose_from,
                 &self.compose_to,
                 &self.compose_subject,
@@ -483,14 +571,22 @@ impl cosmic::Application for AppModel {
             }));
         }
 
-        if let Some(session) = &self.session {
-            let session = session.clone();
-            subs.push(
-                Subscription::run_with_id("imap-watch", watch::imap_watch_stream(session))
-                    .map(Message::ImapEvent),
-            );
+        // Per-account IMAP watch streams
+        for (i, acct) in self.accounts.iter().enumerate() {
+            if let Some(session) = &acct.session {
+                let session = session.clone();
+                let account_id = acct.config.id.clone();
+                let sub_id = format!("imap-watch-{}", i);
+                subs.push(
+                    Subscription::run_with_id(sub_id, watch::imap_watch_stream(session))
+                        .map(move |evt| Message::ImapEvent(account_id.clone(), evt)),
+                );
+            }
+        }
 
-            // Periodic full sync to catch changes IDLE misses (e.g. remote deletions)
+        // Periodic full sync (any connected account)
+        let has_any_session = self.accounts.iter().any(|a| a.session.is_some());
+        if has_any_session {
             subs.push(Subscription::run_with_id(
                 "periodic-sync",
                 cosmic::iced_futures::stream::channel(1, |mut output| async move {
@@ -513,9 +609,9 @@ impl cosmic::Application for AppModel {
         let main_content = widget::PaneGrid::new(&self.panes, |_pane, kind, _is_maximized| {
             let body: Element<'_, Self::Message> = match kind {
                 PaneKind::Sidebar => crate::ui::sidebar::view(
-                    &self.folders,
+                    &self.accounts,
+                    self.active_account,
                     self.selected_folder,
-                    &self.conn_state,
                     self.folder_drag_target,
                 ),
                 PaneKind::MessageList => crate::ui::message_list::view(
@@ -583,6 +679,7 @@ impl cosmic::Application for AppModel {
             Message::ComposeNew
             | Message::ComposeReply
             | Message::ComposeForward
+            | Message::ComposeAccountChanged(_)
             | Message::ComposeFromChanged(_)
             | Message::ComposeToChanged(_)
             | Message::ComposeSubjectChanged(_)
@@ -600,25 +697,37 @@ impl cosmic::Application for AppModel {
             | Message::SendComplete(_) => self.handle_compose(message),
 
             // Setup
-            Message::SetupServerChanged(_)
+            Message::SetupLabelChanged(_)
+            | Message::SetupServerChanged(_)
             | Message::SetupPortChanged(_)
             | Message::SetupUsernameChanged(_)
             | Message::SetupPasswordChanged(_)
             | Message::SetupStarttlsToggled(_)
             | Message::SetupPasswordVisibilityToggled
             | Message::SetupEmailAddressesChanged(_)
+            | Message::SetupSmtpServerChanged(_)
+            | Message::SetupSmtpPortChanged(_)
+            | Message::SetupSmtpUsernameChanged(_)
+            | Message::SetupSmtpPasswordChanged(_)
+            | Message::SetupSmtpStarttlsToggled(_)
             | Message::SetupSubmit
             | Message::SetupCancel => self.handle_setup(message),
 
+            // Account management
+            Message::AccountAdd
+            | Message::AccountEdit(_)
+            | Message::AccountRemove(_)
+            | Message::ToggleAccountCollapse(_) => self.handle_account_management(message),
+
             // Sync / connection / folder selection
-            Message::Connected(_)
-            | Message::CachedFoldersLoaded(_)
+            Message::AccountConnected { .. }
+            | Message::CachedFoldersLoaded { .. }
             | Message::CachedMessagesLoaded(_)
-            | Message::SyncFoldersComplete(_)
+            | Message::SyncFoldersComplete { .. }
             | Message::SyncMessagesComplete(_)
-            | Message::SelectFolder(_)
+            | Message::SelectFolder(_, _)
             | Message::LoadMoreMessages
-            | Message::ForceReconnect
+            | Message::ForceReconnect(_)
             | Message::Refresh => self.handle_sync(message),
 
             // Body / attachment viewing
@@ -655,7 +764,7 @@ impl cosmic::Application for AppModel {
             | Message::SearchClear => self.handle_search(message),
 
             // IMAP watch events
-            Message::ImapEvent(_) => self.handle_watch(message),
+            Message::ImapEvent(_, _) => self.handle_watch(message),
 
             // Pane layout
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -674,15 +783,189 @@ impl AppModel {
     }
 
     pub(super) fn is_busy(&self) -> bool {
-        matches!(
-            self.conn_state,
-            ConnectionState::Connecting | ConnectionState::Syncing
-        )
+        self.active_account
+            .and_then(|i| self.accounts.get(i))
+            .is_some_and(|a| {
+                matches!(
+                    a.conn_state,
+                    ConnectionState::Connecting | ConnectionState::Syncing
+                )
+            })
     }
 
     /// Dispatch a message through the update loop (for recursive calls from handlers).
     pub(super) fn dispatch(&mut self, message: Message) -> Task<Message> {
         <Self as cosmic::Application>::update(self, message)
+    }
+
+    /// Find the account index that owns a given mailbox_hash.
+    pub(super) fn account_for_mailbox(&self, mailbox_hash: u64) -> Option<usize> {
+        self.accounts.iter().position(|a| {
+            a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash)
+        })
+    }
+
+    /// Get the session for a given mailbox_hash.
+    pub(super) fn session_for_mailbox(&self, mailbox_hash: u64) -> Option<Arc<ImapSession>> {
+        self.account_for_mailbox(mailbox_hash)
+            .and_then(|i| self.accounts[i].session.clone())
+    }
+
+    /// Get the folder_map for a given mailbox_hash's owning account.
+    pub(super) fn folder_map_for_mailbox(&self, mailbox_hash: u64) -> Option<&HashMap<String, u64>> {
+        self.account_for_mailbox(mailbox_hash)
+            .map(|i| &self.accounts[i].folder_map)
+    }
+
+    /// Get the active account's ID, or empty string.
+    pub(super) fn active_account_id(&self) -> String {
+        self.active_account
+            .and_then(|i| self.accounts.get(i))
+            .map(|a| a.config.id.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the active account's session.
+    pub(super) fn active_session(&self) -> Option<Arc<ImapSession>> {
+        self.active_account
+            .and_then(|i| self.accounts.get(i))
+            .and_then(|a| a.session.clone())
+    }
+
+    /// Find account index by ID.
+    pub(super) fn account_index(&self, account_id: &str) -> Option<usize> {
+        self.accounts.iter().position(|a| a.config.id == account_id)
+    }
+
+    /// Refresh the cached compose labels (account labels + from addresses)
+    /// so dialog() can borrow them with &self lifetime.
+    pub(super) fn refresh_compose_cache(&mut self) {
+        self.compose_account_labels = self.accounts.iter().map(|a| a.config.label.clone()).collect();
+        self.compose_cached_from = self
+            .accounts
+            .get(self.compose_account)
+            .map(|a| a.config.email_addresses.clone())
+            .unwrap_or_default();
+    }
+
+    /// Handle account management messages (add/edit/remove/collapse).
+    fn handle_account_management(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::AccountAdd => {
+                self.setup_editing_account = None;
+                self.setup_label.clear();
+                self.setup_server.clear();
+                self.setup_port = "993".into();
+                self.setup_username.clear();
+                self.setup_password.clear();
+                self.setup_starttls = false;
+                self.setup_password_visible = false;
+                self.setup_email_addresses.clear();
+                self.setup_error = None;
+                self.setup_smtp_server.clear();
+                self.setup_smtp_port = "587".into();
+                self.setup_smtp_username.clear();
+                self.setup_smtp_password.clear();
+                self.setup_smtp_starttls = true;
+                self.password_only_mode = false;
+                self.show_setup_dialog = true;
+            }
+            Message::AccountEdit(ref id) => {
+                if let Some(acct) = self.accounts.iter().find(|a| &a.config.id == id) {
+                    self.setup_editing_account = Some(id.clone());
+                    self.setup_label = acct.config.label.clone();
+                    self.setup_server = acct.config.imap_server.clone();
+                    self.setup_port = acct.config.imap_port.to_string();
+                    self.setup_username = acct.config.username.clone();
+                    self.setup_password.clear(); // Don't pre-fill password
+                    self.setup_starttls = acct.config.use_starttls;
+                    self.setup_password_visible = false;
+                    self.setup_email_addresses = acct.config.email_addresses.join(", ");
+                    self.setup_error = None;
+                    self.setup_smtp_server = acct.config.smtp_overrides.server.clone().unwrap_or_default();
+                    self.setup_smtp_port = acct.config.smtp_overrides.port.map(|p| p.to_string()).unwrap_or_else(|| "587".into());
+                    self.setup_smtp_username = acct.config.smtp_overrides.username.clone().unwrap_or_default();
+                    self.setup_smtp_password.clear();
+                    self.setup_smtp_starttls = acct.config.smtp_overrides.use_starttls.unwrap_or(true);
+                    self.password_only_mode = false;
+                    self.show_setup_dialog = true;
+                }
+            }
+            Message::AccountRemove(ref id) => {
+                if let Some(idx) = self.account_index(id) {
+                    let removed_id = self.accounts[idx].config.id.clone();
+                    let removed_username = self.accounts[idx].config.username.clone();
+                    let removed_server = self.accounts[idx].config.imap_server.clone();
+                    self.accounts.remove(idx);
+                    // Adjust active_account
+                    if let Some(active) = self.active_account {
+                        if active == idx {
+                            self.active_account = None;
+                            self.messages.clear();
+                            self.selected_folder = None;
+                            self.preview_body.clear();
+                            self.preview_markdown.clear();
+                        } else if active > idx {
+                            self.active_account = Some(active - 1);
+                        }
+                    }
+                    // Save updated config
+                    let _ = self.save_multi_account_config();
+
+                    // Clean up keyring passwords
+                    if let Err(e) = crate::core::keyring::delete_password(&removed_username, &removed_server) {
+                        log::warn!("Failed to delete IMAP password from keyring: {}", e);
+                    }
+                    if let Err(e) = crate::core::keyring::delete_smtp_password(&removed_id) {
+                        log::debug!("No SMTP password to delete from keyring: {}", e);
+                    }
+
+                    self.status_message = "Account removed".into();
+
+                    // Clean up cached data for removed account
+                    if let Some(cache) = &self.cache {
+                        let cache = cache.clone();
+                        return cosmic::task::future(async move {
+                            if let Err(e) = cache.remove_account(removed_id).await {
+                                log::warn!("Failed to clean cache for removed account: {}", e);
+                            }
+                            Message::Noop
+                        });
+                    }
+                }
+            }
+            Message::ToggleAccountCollapse(idx) => {
+                if let Some(acct) = self.accounts.get_mut(idx) {
+                    acct.collapsed = !acct.collapsed;
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Save the current account list to the multi-account config file.
+    pub(super) fn save_multi_account_config(&self) -> Result<(), String> {
+        use crate::config::{FileAccountConfig, MultiAccountFileConfig, PasswordBackend};
+
+        let accounts: Vec<FileAccountConfig> = self
+            .accounts
+            .iter()
+            .map(|a| FileAccountConfig {
+                id: a.config.id.clone(),
+                label: a.config.label.clone(),
+                server: a.config.imap_server.clone(),
+                port: a.config.imap_port,
+                username: a.config.username.clone(),
+                starttls: a.config.use_starttls,
+                password: PasswordBackend::Keyring,
+                email_addresses: a.config.email_addresses.clone(),
+                smtp: a.config.smtp_overrides.clone(),
+            })
+            .collect();
+
+        let config = MultiAccountFileConfig { accounts };
+        config.save()
     }
 
     /// Extract current split ratios from pane_grid layout tree and persist.

@@ -26,6 +26,8 @@ fn format_size(bytes: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     mode: &ComposeMode,
+    account_labels: &'a [String],
+    selected_account: usize,
     from_addresses: &'a [String],
     from_selected: usize,
     to: &'a str,
@@ -43,6 +45,20 @@ pub fn view<'a>(
     };
 
     let mut controls = widget::column().spacing(12);
+
+    // Account selector (shown when >1 account)
+    if account_labels.len() > 1 {
+        controls = controls.push(
+            widget::column()
+                .spacing(4)
+                .push(widget::text::body("Account"))
+                .push(widget::dropdown(
+                    account_labels,
+                    Some(selected_account),
+                    Message::ComposeAccountChanged,
+                )),
+        );
+    }
 
     if from_addresses.len() > 1 {
         controls = controls.push(

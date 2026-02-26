@@ -3,7 +3,6 @@ use cosmic::dialog::file_chooser;
 use cosmic::widget::text_editor;
 
 use super::{AppModel, Message};
-use crate::config::SmtpConfig;
 use crate::core::models::{AttachmentData, DraggedFiles};
 use crate::core::smtp::{self, OutgoingEmail};
 use crate::ui::compose_dialog::ComposeMode;
@@ -52,6 +51,7 @@ impl AppModel {
                     return Task::none();
                 }
                 self.compose_mode = ComposeMode::New;
+                self.compose_account = self.active_account.unwrap_or(0);
                 self.compose_from = 0;
                 self.compose_to.clear();
                 self.compose_subject.clear();
@@ -62,6 +62,7 @@ impl AppModel {
                 self.compose_error = None;
                 self.is_sending = false;
                 self.show_compose_dialog = true;
+                self.refresh_compose_cache();
             }
 
             Message::ComposeReply => {
@@ -71,6 +72,9 @@ impl AppModel {
                 if let Some(index) = self.selected_message {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Reply;
+                        // Auto-select owning account
+                        self.compose_account = self.account_for_mailbox(msg.mailbox_hash)
+                            .unwrap_or(self.active_account.unwrap_or(0));
                         self.compose_to = msg.from.clone();
 
                         let subj = &msg.subject;
@@ -93,6 +97,7 @@ impl AppModel {
                         self.compose_error = None;
                         self.is_sending = false;
                         self.show_compose_dialog = true;
+                        self.refresh_compose_cache();
                     }
                 }
             }
@@ -104,6 +109,9 @@ impl AppModel {
                 if let Some(index) = self.selected_message {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Forward;
+                        // Auto-select owning account
+                        self.compose_account = self.account_for_mailbox(msg.mailbox_hash)
+                            .unwrap_or(self.active_account.unwrap_or(0));
                         self.compose_to.clear();
 
                         let subj = &msg.subject;
@@ -128,10 +136,16 @@ impl AppModel {
                         self.compose_error = None;
                         self.is_sending = false;
                         self.show_compose_dialog = true;
+                        self.refresh_compose_cache();
                     }
                 }
             }
 
+            Message::ComposeAccountChanged(i) => {
+                self.compose_account = i;
+                self.compose_from = 0; // Reset from index when account changes
+                self.refresh_compose_cache();
+            }
             Message::ComposeFromChanged(i) => {
                 self.compose_from = i;
             }
@@ -249,17 +263,17 @@ impl AppModel {
                     return Task::none();
                 }
 
-                let Some(ref config) = self.config else {
-                    self.compose_error = Some("Not configured".into());
+                let Some(acct) = self.accounts.get(self.compose_account) else {
+                    self.compose_error = Some("No account selected".into());
                     return Task::none();
                 };
 
-                let from_addr = config
-                    .email_addresses
+                let from_addrs = &acct.config.email_addresses;
+                let from_addr = from_addrs
                     .get(self.compose_from)
                     .cloned()
                     .unwrap_or_else(|| {
-                        config.email_addresses.first().cloned().unwrap_or_default()
+                        from_addrs.first().cloned().unwrap_or_default()
                     });
                 if from_addr.is_empty() {
                     self.compose_error = Some(
@@ -271,7 +285,7 @@ impl AppModel {
                 self.is_sending = true;
                 self.compose_error = None;
 
-                let smtp_config = SmtpConfig::from_imap_config(config);
+                let smtp_config = acct.config.smtp.clone();
                 let email = OutgoingEmail {
                     from: from_addr,
                     to: self.compose_to.clone(),

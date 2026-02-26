@@ -88,16 +88,18 @@ pub(super) fn imap_watch_stream(
 impl AppModel {
     pub(super) fn handle_watch(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::ImapEvent(ImapWatchEvent::NewMessage {
+            Message::ImapEvent(ref _account_id, ImapWatchEvent::NewMessage {
                 mailbox_hash,
                 subject,
                 from,
             }) => {
                 let notif_task = cosmic::task::future(async move {
+                    let subj = subject;
+                    let f = from;
                     let _ = tokio::task::spawn_blocking(move || {
                         let _ = notify_rust::Notification::new()
-                            .summary(&format!("From: {}", from))
-                            .body(&subject)
+                            .summary(&format!("From: {}", f))
+                            .body(&subj)
                             .icon("mail-message-new")
                             .timeout(5000)
                             .show();
@@ -106,22 +108,30 @@ impl AppModel {
                     Message::Noop
                 });
 
-                if let Some(idx) = self.selected_folder {
-                    if let Some(folder) = self.folders.get(idx) {
-                        if folder.mailbox_hash == mailbox_hash {
-                            let refresh_task = self.dispatch(Message::Refresh);
-                            return cosmic::task::batch(vec![notif_task, refresh_task]);
+                // If viewing a folder from this account that matches the mailbox, refresh
+                if let Some(acct_idx) = self.active_account {
+                    if let Some(fi) = self.selected_folder {
+                        if let Some(folder) = self.accounts.get(acct_idx).and_then(|a| a.folders.get(fi)) {
+                            if folder.mailbox_hash == mailbox_hash {
+                                let refresh_task = self.dispatch(Message::Refresh);
+                                return cosmic::task::batch(vec![notif_task, refresh_task]);
+                            }
                         }
                     }
                 }
                 return notif_task;
             }
-            Message::ImapEvent(ImapWatchEvent::MessageRemoved {
+            Message::ImapEvent(_, ImapWatchEvent::MessageRemoved {
                 mailbox_hash,
                 envelope_hash,
             }) => {
                 // Only act if we're viewing the affected mailbox
-                let viewing_mailbox = self.selected_folder.and_then(|i| self.folders.get(i))
+                let viewing_mailbox = self.active_account
+                    .and_then(|ai| {
+                        self.selected_folder.and_then(|fi| {
+                            self.accounts.get(ai).and_then(|a| a.folders.get(fi))
+                        })
+                    })
                     .is_some_and(|f| f.mailbox_hash == mailbox_hash);
 
                 if viewing_mailbox {
@@ -165,12 +175,17 @@ impl AppModel {
                 }
             }
 
-            Message::ImapEvent(ImapWatchEvent::FlagsChanged {
+            Message::ImapEvent(_, ImapWatchEvent::FlagsChanged {
                 mailbox_hash,
                 envelope_hash,
                 flags,
             }) => {
-                let viewing_mailbox = self.selected_folder.and_then(|i| self.folders.get(i))
+                let viewing_mailbox = self.active_account
+                    .and_then(|ai| {
+                        self.selected_folder.and_then(|fi| {
+                            self.accounts.get(ai).and_then(|a| a.folders.get(fi))
+                        })
+                    })
                     .is_some_and(|f| f.mailbox_hash == mailbox_hash);
 
                 if viewing_mailbox {
@@ -195,27 +210,33 @@ impl AppModel {
                 }
             }
 
-            Message::ImapEvent(ImapWatchEvent::Rescan) => {
+            Message::ImapEvent(_, ImapWatchEvent::Rescan) => {
                 return self.dispatch(Message::Refresh);
             }
 
-            Message::ImapEvent(ImapWatchEvent::WatchError(e)) => {
-                log::warn!("IMAP watch error: {}", e);
-                self.conn_state = ConnectionState::Error(e);
-                self.session = None;
-                return cosmic::task::future(async {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    Message::ForceReconnect
-                });
+            Message::ImapEvent(ref account_id, ImapWatchEvent::WatchError(ref e)) => {
+                log::warn!("IMAP watch error for account: {}", e);
+                if let Some(idx) = self.account_index(account_id) {
+                    self.accounts[idx].conn_state = ConnectionState::Error(e.clone());
+                    self.accounts[idx].session = None;
+                    let aid = account_id.clone();
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        Message::ForceReconnect(aid)
+                    });
+                }
             }
-            Message::ImapEvent(ImapWatchEvent::WatchEnded) => {
-                log::info!("IMAP watch stream ended");
-                self.conn_state = ConnectionState::Error("Connection lost".into());
-                self.session = None;
-                return cosmic::task::future(async {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    Message::ForceReconnect
-                });
+            Message::ImapEvent(ref account_id, ImapWatchEvent::WatchEnded) => {
+                log::info!("IMAP watch stream ended for account");
+                if let Some(idx) = self.account_index(account_id) {
+                    self.accounts[idx].conn_state = ConnectionState::Error("Connection lost".into());
+                    self.accounts[idx].session = None;
+                    let aid = account_id.clone();
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        Message::ForceReconnect(aid)
+                    });
+                }
             }
 
             _ => {}

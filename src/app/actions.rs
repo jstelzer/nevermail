@@ -31,8 +31,7 @@ impl AppModel {
                         }));
                     }
 
-                    if let Some(session) = &self.session {
-                        let session = session.clone();
+                    if let Some(session) = self.session_for_mailbox(mailbox_hash) {
                         let flag_op = if new_read {
                             FlagOp::Set(Flag::SEEN)
                         } else {
@@ -81,8 +80,7 @@ impl AppModel {
                         }));
                     }
 
-                    if let Some(session) = &self.session {
-                        let session = session.clone();
+                    if let Some(session) = self.session_for_mailbox(mailbox_hash) {
                         let flag_op = if new_starred {
                             FlagOp::Set(Flag::FLAGGED)
                         } else {
@@ -110,27 +108,31 @@ impl AppModel {
             }
 
             Message::Trash(index) => {
-                if let Some(trash_hash) = self.folder_map.get("Trash").or_else(|| self.folder_map.get("INBOX.Trash")).copied() {
-                    if let Some(msg) = self.messages.get(index) {
-                        let envelope_hash = msg.envelope_hash;
-                        let source_mailbox = msg.mailbox_hash;
-                        self.remove_message_optimistic(index);
-                        return self.dispatch_move(envelope_hash, source_mailbox, trash_hash);
+                if let Some(msg) = self.messages.get(index) {
+                    let mailbox_hash = msg.mailbox_hash;
+                    if let Some(folder_map) = self.folder_map_for_mailbox(mailbox_hash) {
+                        if let Some(trash_hash) = folder_map.get("Trash").or_else(|| folder_map.get("INBOX.Trash")).copied() {
+                            let envelope_hash = msg.envelope_hash;
+                            let source_mailbox = msg.mailbox_hash;
+                            self.remove_message_optimistic(index);
+                            return self.dispatch_move(envelope_hash, source_mailbox, trash_hash);
+                        }
                     }
-                } else {
                     self.status_message = "Trash folder not found".into();
                 }
             }
 
             Message::Archive(index) => {
-                if let Some(archive_hash) = self.folder_map.get("Archive").or_else(|| self.folder_map.get("INBOX.Archive")).copied() {
-                    if let Some(msg) = self.messages.get(index) {
-                        let envelope_hash = msg.envelope_hash;
-                        let source_mailbox = msg.mailbox_hash;
-                        self.remove_message_optimistic(index);
-                        return self.dispatch_move(envelope_hash, source_mailbox, archive_hash);
+                if let Some(msg) = self.messages.get(index) {
+                    let mailbox_hash = msg.mailbox_hash;
+                    if let Some(folder_map) = self.folder_map_for_mailbox(mailbox_hash) {
+                        if let Some(archive_hash) = folder_map.get("Archive").or_else(|| folder_map.get("INBOX.Archive")).copied() {
+                            let envelope_hash = msg.envelope_hash;
+                            let source_mailbox = msg.mailbox_hash;
+                            self.remove_message_optimistic(index);
+                            return self.dispatch_move(envelope_hash, source_mailbox, archive_hash);
+                        }
                     }
-                } else {
                     self.status_message = "Archive folder not found".into();
                 }
             }
@@ -144,6 +146,14 @@ impl AppModel {
 
                 // No-op if dragged onto the same folder
                 if source_mailbox == dest_mailbox {
+                    return Task::none();
+                }
+
+                // Prevent cross-account moves (IMAP MOVE is intra-server only)
+                let src_acct = self.account_for_mailbox(source_mailbox);
+                let dst_acct = self.account_for_mailbox(dest_mailbox);
+                if src_acct != dst_acct {
+                    self.status_message = "Cannot move messages between accounts".into();
                     return Task::none();
                 }
 
@@ -217,8 +227,6 @@ impl AppModel {
                     Err(e) => {
                         log::error!("Move operation failed: {}", e);
                         self.status_message = format!("Move failed: {}", e);
-                        // TODO: re-insert message on failure (would need to store removed msg)
-                        // For now, a refresh will restore correct state
                     }
                 }
             }
@@ -268,8 +276,7 @@ impl AppModel {
             }));
         }
 
-        if let Some(session) = &self.session {
-            let session = session.clone();
+        if let Some(session) = self.session_for_mailbox(source_mailbox) {
             tasks.push(cosmic::task::future(async move {
                 let result = session
                     .move_messages(

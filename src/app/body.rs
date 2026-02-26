@@ -18,7 +18,8 @@ impl AppModel {
 
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
-                        let session = self.session.clone();
+                        let session = self.session_for_mailbox(msg.mailbox_hash)
+                            .or_else(|| self.active_session());
                         self.status_message = "Loading message...".into();
                         return cosmic::task::future(async move {
                             // Unified cache-first: try cache (includes attachments)
@@ -55,8 +56,9 @@ impl AppModel {
                     }
 
                     // No-cache fallback: direct IMAP fetch
-                    if let Some(session) = &self.session {
-                        let session = session.clone();
+                    let session = self.session_for_mailbox(msg.mailbox_hash)
+                        .or_else(|| self.active_session());
+                    if let Some(session) = session {
                         self.status_message = "Loading message...".into();
                         return cosmic::task::future(async move {
                             Message::BodyLoaded(

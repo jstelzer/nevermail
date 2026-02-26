@@ -47,7 +47,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     })
 }
 
-pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(), String> {
+pub(super) fn do_save_folders(conn: &Connection, account_id: &str, folders: &[Folder]) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("Cache tx error: {e}"))?;
@@ -55,13 +55,14 @@ pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(
     // Upsert each folder — updates counts if already present, inserts if new.
     let mut stmt = tx
         .prepare(
-            "INSERT INTO folders (path, name, mailbox_hash, unread_count, total_count)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO folders (path, name, mailbox_hash, unread_count, total_count, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path) DO UPDATE SET
                  name = excluded.name,
                  mailbox_hash = excluded.mailbox_hash,
                  unread_count = excluded.unread_count,
-                 total_count = excluded.total_count",
+                 total_count = excluded.total_count,
+                 account_id = excluded.account_id",
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
@@ -72,48 +73,60 @@ pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(
             f.mailbox_hash as i64,
             f.unread_count,
             f.total_count,
+            account_id,
         ])
         .map_err(|e| format!("Cache insert error: {e}"))?;
     }
     drop(stmt);
 
-    // Remove folders that no longer exist on the server.
+    // Remove folders that no longer exist on the server FOR THIS ACCOUNT.
     // Cascade: delete orphaned messages and their attachments first.
     let server_hashes: Vec<i64> = folders.iter().map(|f| f.mailbox_hash as i64).collect();
     if server_hashes.is_empty() {
-        // Server returned no folders — clear everything
-        tx.execute("DELETE FROM attachments", [])
+        // Server returned no folders for this account — clear this account's data
+        tx.execute(
+            "DELETE FROM attachments WHERE envelope_hash IN (
+                SELECT envelope_hash FROM messages WHERE account_id = ?1
+            )",
+            [account_id],
+        )
+        .map_err(|e| format!("Cache cascade error: {e}"))?;
+        tx.execute("DELETE FROM messages WHERE account_id = ?1", [account_id])
             .map_err(|e| format!("Cache cascade error: {e}"))?;
-        tx.execute("DELETE FROM messages", [])
-            .map_err(|e| format!("Cache cascade error: {e}"))?;
-        tx.execute("DELETE FROM folders", [])
+        tx.execute("DELETE FROM folders WHERE account_id = ?1", [account_id])
             .map_err(|e| format!("Cache delete error: {e}"))?;
     } else {
+        // Build placeholders for the IN clause, offset by 1 for account_id param
         let placeholders: String = (0..server_hashes.len())
-            .map(|i| format!("?{}", i + 1))
+            .map(|i| format!("?{}", i + 2))
             .collect::<Vec<_>>()
             .join(",");
 
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params.push(Box::new(account_id.to_string()));
+        for h in &server_hashes {
+            params.push(Box::new(*h));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
         let sql = format!(
             "DELETE FROM attachments WHERE envelope_hash IN (
-                SELECT envelope_hash FROM messages WHERE mailbox_hash NOT IN ({placeholders})
+                SELECT envelope_hash FROM messages WHERE account_id = ?1 AND mailbox_hash NOT IN ({placeholders})
             )"
         );
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            server_hashes.iter().map(|h| h as &dyn rusqlite::types::ToSql).collect();
-        tx.execute(&sql, params.as_slice())
+        tx.execute(&sql, param_refs.as_slice())
             .map_err(|e| format!("Cache cascade error: {e}"))?;
 
         let sql = format!(
-            "DELETE FROM messages WHERE mailbox_hash NOT IN ({placeholders})"
+            "DELETE FROM messages WHERE account_id = ?1 AND mailbox_hash NOT IN ({placeholders})"
         );
-        tx.execute(&sql, params.as_slice())
+        tx.execute(&sql, param_refs.as_slice())
             .map_err(|e| format!("Cache cascade error: {e}"))?;
 
         let sql = format!(
-            "DELETE FROM folders WHERE mailbox_hash NOT IN ({placeholders})"
+            "DELETE FROM folders WHERE account_id = ?1 AND mailbox_hash NOT IN ({placeholders})"
         );
-        tx.execute(&sql, params.as_slice())
+        tx.execute(&sql, param_refs.as_slice())
             .map_err(|e| format!("Cache delete error: {e}"))?;
     }
 
@@ -122,13 +135,16 @@ pub(super) fn do_save_folders(conn: &Connection, folders: &[Folder]) -> Result<(
     Ok(())
 }
 
-pub(super) fn do_load_folders(conn: &Connection) -> Result<Vec<Folder>, String> {
+pub(super) fn do_load_folders(conn: &Connection, account_id: &str) -> Result<Vec<Folder>, String> {
     let mut stmt = conn
-        .prepare("SELECT path, name, mailbox_hash, unread_count, total_count FROM folders")
+        .prepare(
+            "SELECT path, name, mailbox_hash, unread_count, total_count FROM folders
+             WHERE account_id = ?1 OR account_id = ''"
+        )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([account_id], |row| {
             Ok(Folder {
                 path: row.get(0)?,
                 name: row.get(1)?,
@@ -160,6 +176,7 @@ pub(super) fn do_load_folders(conn: &Connection) -> Result<Vec<Folder>, String> 
 
 pub(super) fn do_save_messages(
     conn: &Connection,
+    account_id: &str,
     mailbox_hash: u64,
     messages: &[MessageSummary],
 ) -> Result<(), String> {
@@ -205,8 +222,8 @@ pub(super) fn do_save_messages(
             "INSERT OR IGNORE INTO messages
              (envelope_hash, mailbox_hash, subject, sender, date, timestamp,
               is_read, is_starred, has_attachments, thread_id, flags_server, flags_local,
-              message_id, in_reply_to, thread_depth, reply_to, recipient)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              message_id, in_reply_to, thread_depth, reply_to, recipient, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .map_err(|e| format!("Cache prepare error: {e}"))?;
 
@@ -263,6 +280,7 @@ pub(super) fn do_save_messages(
                 m.thread_depth,
                 m.reply_to,
                 m.to,
+                account_id,
             ])
             .map_err(|e| format!("Cache insert error: {e}"))?;
         }
@@ -277,6 +295,7 @@ pub(super) fn do_save_messages(
 
 pub(super) fn do_load_messages(
     conn: &Connection,
+    account_id: &str,
     mailbox_hash: u64,
     limit: u32,
     offset: u32,
@@ -288,7 +307,7 @@ pub(super) fn do_load_messages(
                     flags_server, flags_local, pending_op, mailbox_hash,
                     message_id, in_reply_to, thread_depth, reply_to, recipient
              FROM messages
-             WHERE mailbox_hash = ?1
+             WHERE mailbox_hash = ?1 AND (account_id = ?4 OR account_id = '')
              ORDER BY
                  MAX(timestamp) OVER (
                      PARTITION BY COALESCE(thread_id, envelope_hash)
@@ -301,7 +320,7 @@ pub(super) fn do_load_messages(
 
     let rows = stmt
         .query_map(
-            rusqlite::params![mailbox_hash as i64, limit, offset],
+            rusqlite::params![mailbox_hash as i64, limit, offset, account_id],
             row_to_summary,
         )
         .map_err(|e| format!("Cache query error: {e}"))?;
@@ -477,6 +496,37 @@ pub(super) fn do_remove_message(conn: &Connection, envelope_hash: u64) -> Result
         [envelope_hash as i64],
     )
     .map_err(|e| format!("Cache remove_message error: {e}"))?;
+    Ok(())
+}
+
+pub(super) fn do_remove_account(conn: &Connection, account_id: &str) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Cache tx error: {e}"))?;
+
+    // Remove attachments for messages belonging to this account
+    tx.execute(
+        "DELETE FROM attachments WHERE envelope_hash IN (SELECT envelope_hash FROM messages WHERE account_id = ?1)",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache attachment cleanup error: {e}"))?;
+
+    // Remove messages
+    tx.execute(
+        "DELETE FROM messages WHERE account_id = ?1",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache message cleanup error: {e}"))?;
+
+    // Remove folders
+    tx.execute(
+        "DELETE FROM folders WHERE account_id = ?1",
+        [account_id],
+    )
+    .map_err(|e| format!("Cache folder cleanup error: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Cache commit error: {e}"))?;
     Ok(())
 }
 
