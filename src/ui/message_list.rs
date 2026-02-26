@@ -5,7 +5,9 @@ use cosmic::widget;
 use cosmic::Element;
 
 use crate::app::Message;
-use crate::core::models::{DraggedMessage, MessageSummary};
+use nevermail_core::models::MessageSummary;
+
+use crate::dnd_models::DraggedMessage;
 
 pub fn search_input_id() -> widget::Id {
     widget::Id::new("search-input")

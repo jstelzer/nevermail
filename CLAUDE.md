@@ -28,39 +28,55 @@ This is an upstream melib bug. Monitor melib releases for a fix.
 
 ## Architecture
 
+This is a Cargo workspace with two crates:
+
+- **nevermail-core** — Headless email engine (zero COSMIC deps). Library crate.
+- **nevermail** (root) — COSMIC desktop GUI. Binary crate, depends on nevermail-core.
+
 ```
-src/
-├── main.rs                    — Entry point, env_logger init, cosmic::app::run
-├── config.rs                  — Config resolution (env → file+keyring → setup dialog)
-├── app/
-│   ├── mod.rs                 — AppModel struct, Message enum, trait impl, dispatcher
-│   ├── actions.rs             — Flag/move handlers (toggle read/star, trash, archive)
-│   ├── body.rs                — Body/attachment viewing handlers
-│   ├── compose.rs             — Compose handlers + quote/forward helpers
-│   ├── navigation.rs          — Keyboard nav + recompute_visible()
-│   ├── search.rs              — FTS search handlers
-│   ├── setup.rs               — Setup dialog handlers + view builder
-│   ├── sync.rs                — Connection/sync/folder handlers + rebuild_folder_map()
-│   └── watch.rs               — IMAP IDLE watch stream + event handlers
-├── core/
-│   ├── imap.rs                — ImapSession: connect, fetch, flags, move, watch
-│   ├── mime.rs                — render_body, clean_email_html, open_link
-│   ├── smtp.rs                — SMTP send via lettre
-│   ├── keyring.rs             — OS keyring credential backend
-│   ├── models.rs              — Folder, MessageSummary, AttachmentData
-│   └── store/
-│       ├── mod.rs             — Re-exports (CacheHandle, flags_to_u8, DEFAULT_PAGE_SIZE)
-│       ├── schema.rs          — DDL + forward-only migrations + FTS5 setup
-│       ├── flags.rs           — Flag encode/decode (compact 2-bit encoding)
-│       ├── commands.rs        — CacheCmd enum (channel message types)
-│       ├── queries.rs         — All do_* SQL functions + shared row_to_summary
-│       └── handle.rs          — CacheHandle async facade + background thread run_loop
-└── ui/
-    ├── sidebar.rs             — Folder list view
-    ├── message_list.rs        — Message header list + search bar
-    ├── message_view.rs        — Message body preview pane
-    └── compose_dialog.rs      — Compose/reply/forward dialog
+nevermail/                          (workspace root)
+├── Cargo.toml                      (workspace + GUI binary package)
+├── Cargo.lock                      (shared lockfile)
+├── nevermail-core/
+│   ├── Cargo.toml                  (lib: melib, lettre, rusqlite, keyring, ...)
+│   ├── src/
+│   │   ├── lib.rs                  (pub mod + melib re-exports)
+│   │   ├── config.rs              — Config resolution (env → file+keyring → setup dialog)
+│   │   ├── imap.rs                — ImapSession: connect, fetch, flags, move, watch
+│   │   ├── smtp.rs                — SMTP send via lettre
+│   │   ├── mime.rs                — render_body, clean_email_html, open_link
+│   │   ├── keyring.rs             — OS keyring credential backend
+│   │   ├── models.rs              — Folder, MessageSummary, AttachmentData
+│   │   └── store/
+│   │       ├── mod.rs             — Re-exports (CacheHandle, flags_to_u8, DEFAULT_PAGE_SIZE)
+│   │       ├── schema.rs          — DDL + forward-only migrations + FTS5 setup
+│   │       ├── flags.rs           — Flag encode/decode (compact 2-bit encoding)
+│   │       ├── commands.rs        — CacheCmd enum (channel message types)
+│   │       ├── queries.rs         — All do_* SQL functions + shared row_to_summary
+│   │       └── handle.rs          — CacheHandle async facade + background thread run_loop
+│   └── tests/fixtures/             — Test email fixtures
+├── src/                            (GUI binary crate)
+│   ├── main.rs                    — Entry point, env_logger init, cosmic::app::run
+│   ├── dnd_models.rs              — DraggedFiles, DraggedMessage (COSMIC DnD types)
+│   ├── app/
+│   │   ├── mod.rs                 — AppModel struct, Message enum, trait impl, dispatcher
+│   │   ├── actions.rs             — Flag/move handlers (toggle read/star, trash, archive)
+│   │   ├── body.rs                — Body/attachment viewing handlers
+│   │   ├── compose.rs             — Compose handlers + quote/forward helpers
+│   │   ├── navigation.rs          — Keyboard nav + recompute_visible()
+│   │   ├── search.rs              — FTS search handlers
+│   │   ├── setup.rs               — Setup dialog handlers + view builder
+│   │   ├── sync.rs                — Connection/sync/folder handlers
+│   │   └── watch.rs               — IMAP IDLE watch stream + event handlers
+│   └── ui/
+│       ├── sidebar.rs             — Folder list view
+│       ├── message_list.rs        — Message header list + search bar
+│       ├── message_view.rs        — Message body preview pane
+│       └── compose_dialog.rs      — Compose/reply/forward dialog
+└── .github/workflows/ci.yml
 ```
+
+**Import conventions:** GUI code imports from `nevermail_core::` (config, imap, models, store, etc.) and `crate::` (dnd_models, app, ui). Core re-exports key melib types (`EnvelopeHash`, `MailboxHash`, `FlagOp`, `Flag`, `BackendEvent`, `RefreshEventKind`) so the GUI never depends on melib directly.
 
 ## Design Principles
 

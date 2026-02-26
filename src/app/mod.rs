@@ -17,10 +17,12 @@ use cosmic::widget;
 use cosmic::widget::{image, markdown, pane_grid, text_editor};
 use cosmic::Element;
 
-use crate::config::{AccountConfig, AccountId, ConfigNeedsInput, LayoutConfig};
-use crate::core::imap::ImapSession;
-use crate::core::models::{AttachmentData, DraggedFiles, Folder, MessageSummary};
-use crate::core::store::CacheHandle;
+use nevermail_core::config::{AccountConfig, AccountId, ConfigNeedsInput, LayoutConfig};
+use nevermail_core::imap::ImapSession;
+use nevermail_core::models::{AttachmentData, Folder, MessageSummary};
+use nevermail_core::store::CacheHandle;
+
+use crate::dnd_models::DraggedFiles;
 use crate::ui::compose_dialog::ComposeMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,7 +413,7 @@ impl cosmic::Application for AppModel {
         let mut tasks = vec![title_task];
 
         // Resolve config: env → file+keyring → show dialog
-        match crate::config::Config::resolve_all_accounts() {
+        match nevermail_core::config::Config::resolve_all_accounts() {
             Ok(account_configs) => {
                 for ac in account_configs {
                     let account_id = ac.id.clone();
@@ -913,10 +915,10 @@ impl AppModel {
                     let _ = self.save_multi_account_config();
 
                     // Clean up keyring passwords
-                    if let Err(e) = crate::core::keyring::delete_password(&removed_username, &removed_server) {
+                    if let Err(e) = nevermail_core::keyring::delete_password(&removed_username, &removed_server) {
                         log::warn!("Failed to delete IMAP password from keyring: {}", e);
                     }
-                    if let Err(e) = crate::core::keyring::delete_smtp_password(&removed_id) {
+                    if let Err(e) = nevermail_core::keyring::delete_smtp_password(&removed_id) {
                         log::debug!("No SMTP password to delete from keyring: {}", e);
                     }
 
@@ -946,7 +948,7 @@ impl AppModel {
 
     /// Save the current account list to the multi-account config file.
     pub(super) fn save_multi_account_config(&self) -> Result<(), String> {
-        use crate::config::{FileAccountConfig, MultiAccountFileConfig, PasswordBackend};
+        use nevermail_core::config::{FileAccountConfig, MultiAccountFileConfig, PasswordBackend};
 
         let accounts: Vec<FileAccountConfig> = self
             .accounts

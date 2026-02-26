@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use cosmic::app::Task;
 use cosmic::widget::{image, markdown};
-use melib::EnvelopeHash;
+use nevermail_core::EnvelopeHash;
 
 use super::{AppModel, Message};
 
@@ -137,7 +137,7 @@ impl AppModel {
             }
 
             Message::LinkClicked(url) => {
-                crate::core::mime::open_link(url.as_str());
+                nevermail_core::mime::open_link(url.as_str());
             }
 
             Message::CopyBody => {

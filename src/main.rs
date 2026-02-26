@@ -1,6 +1,5 @@
 mod app;
-mod config;
-mod core;
+mod dnd_models;
 mod ui;
 
 fn main() -> cosmic::iced::Result {

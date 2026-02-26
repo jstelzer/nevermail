@@ -3,7 +3,7 @@ use cosmic::widget;
 use cosmic::Element;
 
 use crate::app::{AccountState, ConnectionState, Message};
-use crate::core::models::DraggedMessage;
+use crate::dnd_models::DraggedMessage;
 
 /// Render the folder sidebar with multi-account sections.
 pub fn view<'a>(

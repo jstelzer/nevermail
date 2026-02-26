@@ -3,8 +3,10 @@ use cosmic::dialog::file_chooser;
 use cosmic::widget::text_editor;
 
 use super::{AppModel, Message};
-use crate::core::models::{AttachmentData, DraggedFiles};
-use crate::core::smtp::{self, OutgoingEmail};
+use nevermail_core::models::AttachmentData;
+use nevermail_core::smtp::{self, OutgoingEmail};
+
+use crate::dnd_models::DraggedFiles;
 use crate::ui::compose_dialog::ComposeMode;
 
 /// Guess MIME type from file extension.

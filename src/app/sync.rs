@@ -1,9 +1,9 @@
 use cosmic::app::Task;
-use melib::MailboxHash;
+use nevermail_core::MailboxHash;
+use nevermail_core::imap::ImapSession;
+use nevermail_core::store::DEFAULT_PAGE_SIZE;
 
 use super::{AppModel, ConnectionState, Message};
-use crate::core::imap::ImapSession;
-use crate::core::store::DEFAULT_PAGE_SIZE;
 
 impl AppModel {
     pub(super) fn handle_sync(&mut self, message: Message) -> Task<Message> {

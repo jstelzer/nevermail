@@ -4,7 +4,7 @@ use cosmic::widget::text_editor;
 use cosmic::Element;
 
 use crate::app::Message;
-use crate::core::models::AttachmentData;
+use nevermail_core::models::AttachmentData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComposeMode {

@@ -1,3 +1,15 @@
+[workspace]
+members = ["nevermail-core", "."]
+resolver = "2"
+
+[workspace.dependencies]
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+log = "0.4"
+
 [package]
 name = "nevermail"
 version = "0.1.0"
@@ -6,6 +18,9 @@ license = "GPL-3.0-or-later"
 description = "A COSMIC desktop email client"
 
 [dependencies]
+# Core email engine
+nevermail-core = { path = "nevermail-core" }
+
 # COSMIC UI framework
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
     "tokio",
@@ -15,32 +30,20 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
     "xdg-portal",
 ] }
 
-# Mail engine
-melib = { version = "0.8", default-features = false, features = ["sqlite3", "imap"] }
-indexmap = { version = "2", features = ["serde"] }
-futures = "0.3"
-
-# SMTP sending (Phase 3)
-lettre = { version = "0.11", features = ["tokio1-native-tls"] }
-
-# HTML rendering (privacy-safe sanitization)
-html-safe-md = { version = "0.0.1" }
-
-# Local cache
-rusqlite = { version = "0.37", features = ["bundled"] }
-
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
+futures = { workspace = true }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Credential storage
-keyring = { version = "3", features = ["sync-secret-service"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # XDG directory resolution
-dirs = "6"
+dirs = { workspace = true }
+
+# Logging
+log = { workspace = true }
+env_logger = "0.11"
 
 # URI parsing (file:// URIs from drag-and-drop)
 url = "2"
@@ -48,15 +51,5 @@ url = "2"
 # XDG portal file transfer (drag-and-drop from file managers)
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 
-# Open URLs in browser
-open = "5"
-
 # Desktop notifications
 notify-rust = "4"
-
-# UUID generation for account IDs
-uuid = { version = "1", features = ["v4"] }
-
-# Logging
-log = "0.4"
-env_logger = "0.11"

@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use cosmic::app::Task;
 use futures::{SinkExt, StreamExt};
-use melib::backends::{BackendEvent, RefreshEventKind};
-use melib::email::Flag;
+use nevermail_core::{BackendEvent, RefreshEventKind, Flag};
+use nevermail_core::imap::ImapSession;
+use nevermail_core::store;
 
 use super::{AppModel, ConnectionState, ImapWatchEvent, Message};
-use crate::core::imap::ImapSession;
-use crate::core::store;
 
 pub(super) fn imap_watch_stream(
     session: Arc<ImapSession>,

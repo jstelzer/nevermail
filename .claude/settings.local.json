@@ -22,7 +22,9 @@
       "Bash(echo appstreamcli not installed \\(optional\\):*)",
       "Bash(just:*)",
       "Bash(gh run:*)",
-      "Bash(rustc:*)"
+      "Bash(rustc:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cp:*)"
     ]
   }
 }

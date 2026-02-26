@@ -1,10 +1,8 @@
 use cosmic::app::Task;
-use melib::backends::FlagOp;
-use melib::email::Flag;
-use melib::{EnvelopeHash, MailboxHash};
+use nevermail_core::{EnvelopeHash, FlagOp, Flag, MailboxHash};
+use nevermail_core::store;
 
 use super::{AppModel, Message};
-use crate::core::store;
 
 impl AppModel {
     pub(super) fn handle_actions(&mut self, message: Message) -> Task<Message> {

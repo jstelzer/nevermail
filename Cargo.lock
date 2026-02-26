@@ -3929,20 +3929,33 @@ dependencies = [
  "dirs",
  "env_logger",
  "futures",
+ "libcosmic",
+ "log",
+ "nevermail-core",
+ "notify-rust",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "nevermail-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "futures",
  "html-safe-md",
  "indexmap",
  "keyring",
  "lettre",
- "libcosmic",
  "log",
  "melib",
- "notify-rust",
  "open",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
- "url",
  "uuid",
 ]
 
