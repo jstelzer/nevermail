@@ -35,9 +35,8 @@ Built for users who prefer native, privacy-respecting desktop software over webm
 | UI          | [libcosmic](https://github.com/pop-os/libcosmic)            | COSMIC desktop toolkit (iced fork)        |
 | Mail engine | [melib](https://crates.io/crates/melib)                     | IMAP, MIME parsing, envelope handling     |
 | SMTP        | [lettre](https://crates.io/crates/lettre)                   | Outbound mail delivery                    |
-| HTML render | [html2md](https://crates.io/crates/html2md) + iced markdown | HTML → markdown → native rich text        |
-| Sanitizer   | [ammonia](https://crates.io/crates/ammonia)                 | Strip email layout junk before conversion |
-| Plaintext   | [html2text](https://crates.io/crates/html2text)             | Plain-text fallback for quoting and FTS   |
+| HTML render | [html-safe-md](html-safe-md/) (local crate)                 | Sanitize + convert HTML → markdown        |
+| Plaintext   | [html2text](https://crates.io/crates/html2text) (via above) | Plain-text fallback for quoting and FTS   |
 | Cache       | [rusqlite](https://crates.io/crates/rusqlite)               | Local SQLite message cache + FTS5         |
 | Credentials | [keyring](https://crates.io/crates/keyring)                 | OS keyring (libsecret/gnome-keyring)      |
 | DnD portals | [ashpd](https://crates.io/crates/ashpd)                     | Wayland xdg-portal file transfer          |
@@ -100,13 +99,12 @@ HTML email is a surveillance vector. Tracking pixels, remote image loads, JavaSc
 
 Nevermail sidesteps this entirely. The rendering pipeline is:
 
-1. **ammonia** strips everything that isn't content — scripts, iframes, tracking pixels, remote images, event handlers, `<style>` blocks with external references
-2. **html2md** converts the surviving HTML structure into markdown (headings, lists, links, emphasis)
-3. **iced's markdown widget** renders that as native rich text
+1. **html-safe-md** (a local crate wrapping ammonia + html2md) strips everything that isn't content — scripts, iframes, tracking pixels, remote images, event handlers, `<style>` blocks with external references — then converts the surviving HTML structure into markdown (headings, lists, links, emphasis)
+2. **iced's markdown widget** renders that as native rich text
 
 The result is that you see the message. Formatted text, links, structure — all there. What you don't get is pixel-perfect newsletter layouts, and what senders don't get is a read receipt. That's the trade.
 
-For plain-text quoting and full-text search indexing, **html2text** provides a separate plain-text conversion path that also stays fully local.
+For plain-text quoting and full-text search indexing, **html-safe-md** also provides a plain-text conversion path (via html2text) that stays fully local.
 
 ## Keyboard shortcuts
 
