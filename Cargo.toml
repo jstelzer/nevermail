@@ -24,7 +24,7 @@ futures = "0.3"
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 
 # HTML rendering (privacy-safe sanitization)
-html-safe-md = { path = "html-safe-md" }
+html-safe-md = { version = "0.0.1" }
 
 # Local cache
 rusqlite = { version = "0.37", features = ["bundled"] }
