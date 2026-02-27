@@ -15,8 +15,21 @@ impl AppModel {
 
                 if let Some(msg) = self.messages.get(index) {
                     let envelope_hash = msg.envelope_hash;
+                    let account_id = self
+                        .account_for_mailbox(msg.mailbox_hash)
+                        .and_then(|i| self.accounts.get(i))
+                        .map(|a| a.config.id.clone());
 
                     if let Some(cache) = &self.cache {
+                        let Some(account_id) = account_id.clone() else {
+                            let err = format!(
+                                "Cannot access body cache: no account for mailbox {}",
+                                msg.mailbox_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            return Task::none();
+                        };
                         let cache = cache.clone();
                         let session = self.session_for_mailbox(msg.mailbox_hash)
                             .or_else(|| self.active_session());
@@ -24,7 +37,7 @@ impl AppModel {
                         return cosmic::task::future(async move {
                             // Unified cache-first: try cache (includes attachments)
                             if let Ok(Some((md_body, plain_body, attachments))) =
-                                cache.load_body(envelope_hash).await
+                                cache.load_body(account_id.clone(), envelope_hash).await
                             {
                                 return Message::BodyLoaded(Ok((md_body, plain_body, attachments)));
                             }
@@ -37,6 +50,7 @@ impl AppModel {
                                 if let Ok((ref md_body, ref plain_body, ref attachments)) = result {
                                     if let Err(e) = cache
                                         .save_body(
+                                            account_id.clone(),
                                             envelope_hash,
                                             md_body.clone(),
                                             plain_body.clone(),

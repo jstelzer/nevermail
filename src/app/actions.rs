@@ -21,9 +21,25 @@ impl AppModel {
 
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
+                        let Some(account_id) = self
+                            .account_for_mailbox(mailbox_hash)
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.clone())
+                        else {
+                            let err = format!(
+                                "Cannot update cache flags: no account for mailbox {}",
+                                mailbox_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            return Task::none();
+                        };
                         let op = pending_op.clone();
                         tasks.push(cosmic::task::future(async move {
-                            if let Err(e) = cache.update_flags(envelope_hash, new_flags, op).await {
+                            if let Err(e) = cache
+                                .update_flags(account_id, envelope_hash, new_flags, op)
+                                .await
+                            {
                                 log::warn!("Failed to update cache flags: {}", e);
                             }
                             Message::Noop
@@ -72,9 +88,25 @@ impl AppModel {
 
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
+                        let Some(account_id) = self
+                            .account_for_mailbox(mailbox_hash)
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.clone())
+                        else {
+                            let err = format!(
+                                "Cannot update cache flags: no account for mailbox {}",
+                                mailbox_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            return Task::none();
+                        };
                         let op = pending_op.clone();
                         tasks.push(cosmic::task::future(async move {
-                            if let Err(e) = cache.update_flags(envelope_hash, new_flags, op).await {
+                            if let Err(e) = cache
+                                .update_flags(account_id, envelope_hash, new_flags, op)
+                                .await
+                            {
                                 log::warn!("Failed to update cache flags: {}", e);
                             }
                             Message::Noop
@@ -190,8 +222,27 @@ impl AppModel {
                     Ok(new_flags) => {
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
+                            let Some(account_id) = self
+                                .messages
+                                .iter()
+                                .find(|m| m.envelope_hash == envelope_hash)
+                                .and_then(|m| self.account_for_mailbox(m.mailbox_hash))
+                                .and_then(|i| self.accounts.get(i))
+                                .map(|a| a.config.id.clone())
+                            else {
+                                let err = format!(
+                                    "Cannot clear cache pending op: no account for message {}",
+                                    envelope_hash
+                                );
+                                log::error!("{}", err);
+                                self.status_message = err;
+                                return Task::none();
+                            };
                             return cosmic::task::future(async move {
-                                if let Err(e) = cache.clear_pending_op(envelope_hash, new_flags).await {
+                                if let Err(e) = cache
+                                    .clear_pending_op(account_id, envelope_hash, new_flags)
+                                    .await
+                                {
                                     log::warn!("Failed to clear pending op: {}", e);
                                 }
                                 Message::Noop
@@ -211,8 +262,26 @@ impl AppModel {
 
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
+                            let Some(account_id) = self
+                                .messages
+                                .iter()
+                                .find(|m| m.envelope_hash == envelope_hash)
+                                .and_then(|m| self.account_for_mailbox(m.mailbox_hash))
+                                .and_then(|i| self.accounts.get(i))
+                                .map(|a| a.config.id.clone())
+                            else {
+                                let err = format!(
+                                    "Cannot revert cache pending op: no account for message {}",
+                                    envelope_hash
+                                );
+                                log::error!("{}", err);
+                                self.status_message = err;
+                                return Task::none();
+                            };
                             return cosmic::task::future(async move {
-                                if let Err(e) = cache.revert_pending_op(envelope_hash).await {
+                                if let Err(e) =
+                                    cache.revert_pending_op(account_id, envelope_hash).await
+                                {
                                     log::warn!("Failed to revert pending op: {}", e);
                                 }
                                 Message::Noop
@@ -228,11 +297,29 @@ impl AppModel {
             } => {
                 match result {
                     Ok(()) => {
+                        let Some(account_id) = self
+                            .pending_move_restore
+                            .get(&envelope_hash)
+                            .and_then(|(msg, _)| self.account_for_mailbox(msg.mailbox_hash))
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.clone())
+                        else {
+                            let err = format!(
+                                "Cannot remove moved message from cache: missing account for {}",
+                                envelope_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            self.pending_move_restore.remove(&envelope_hash);
+                            return Task::none();
+                        };
                         self.pending_move_restore.remove(&envelope_hash);
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
                             return cosmic::task::future(async move {
-                                if let Err(e) = cache.remove_message(envelope_hash).await {
+                                if let Err(e) =
+                                    cache.remove_message(account_id, envelope_hash).await
+                                {
                                     log::warn!("Failed to remove message from cache: {}", e);
                                 }
                                 Message::Noop
@@ -289,7 +376,7 @@ impl AppModel {
 
     /// Dispatch IMAP move + cache update tasks for a message move operation.
     fn dispatch_move(
-        &self,
+        &mut self,
         envelope_hash: u64,
         source_mailbox: u64,
         dest_mailbox: u64,
@@ -298,10 +385,28 @@ impl AppModel {
 
         if let Some(cache) = &self.cache {
             let cache = cache.clone();
+            let Some(account_id) = self
+                .account_for_mailbox(source_mailbox)
+                .and_then(|i| self.accounts.get(i))
+                .map(|a| a.config.id.clone())
+            else {
+                let err = format!(
+                    "Cannot queue move cache update: no account for source mailbox {}",
+                    source_mailbox
+                );
+                log::error!("{}", err);
+                self.status_message = err;
+                return Task::none();
+            };
             let new_flags = store::flags_to_u8(true, false);
             tasks.push(cosmic::task::future(async move {
                 if let Err(e) = cache
-                    .update_flags(envelope_hash, new_flags, format!("move:{}", dest_mailbox))
+                    .update_flags(
+                        account_id,
+                        envelope_hash,
+                        new_flags,
+                        format!("move:{}", dest_mailbox),
+                    )
                     .await
                 {
                     log::warn!("Failed to update cache for move: {}", e);

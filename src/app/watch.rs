@@ -164,8 +164,21 @@ impl AppModel {
                     // Fire-and-forget cache cleanup
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
+                        let Some(account_id) = self
+                            .account_for_mailbox(mailbox_hash)
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.clone())
+                        else {
+                            let err = format!(
+                                "Cannot remove cache message: no account for mailbox {}",
+                                mailbox_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            return Task::none();
+                        };
                         return cosmic::task::future(async move {
-                            if let Err(e) = cache.remove_message(envelope_hash).await {
+                            if let Err(e) = cache.remove_message(account_id, envelope_hash).await {
                                 log::warn!("Failed to remove message from cache: {}", e);
                             }
                             Message::Noop
@@ -199,8 +212,23 @@ impl AppModel {
                     // Sync server flags and clear any pending op in cache
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
+                        let Some(account_id) = self
+                            .account_for_mailbox(mailbox_hash)
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.clone())
+                        else {
+                            let err = format!(
+                                "Cannot sync cache flags: no account for mailbox {}",
+                                mailbox_hash
+                            );
+                            log::error!("{}", err);
+                            self.status_message = err;
+                            return Task::none();
+                        };
                         return cosmic::task::future(async move {
-                            if let Err(e) = cache.clear_pending_op(envelope_hash, flags).await {
+                            if let Err(e) =
+                                cache.clear_pending_op(account_id, envelope_hash, flags).await
+                            {
                                 log::warn!("Failed to sync flags in cache: {}", e);
                             }
                             Message::Noop
