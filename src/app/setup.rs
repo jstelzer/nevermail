@@ -3,8 +3,8 @@ use cosmic::widget;
 use cosmic::Element;
 
 use neverlight_mail_core::config::{
-    AccountConfig, FileAccountConfig, MultiAccountFileConfig, PasswordBackend, SmtpConfig,
-    SmtpOverrides, new_account_id,
+    AccountConfig, FileAccountConfig, MultiAccountFileConfig, SmtpConfig,
+    new_account_id,
 };
 use neverlight_mail_core::imap::ImapSession;
 use neverlight_mail_core::setup::{self, FieldId, SetupInput, SetupRequest};
@@ -45,25 +45,23 @@ impl AppModel {
             Message::SetupPasswordVisibilityToggled => {
                 self.setup_password_visible = !self.setup_password_visible;
             }
-            // Email addresses stay COSMIC-local (comma-separated string → Vec on submit)
             Message::SetupEmailAddressesChanged(v) => {
-                self.setup_email_addresses = v;
+                self.setup_mut().update(SetupInput::SetField(FieldId::Email, v));
             }
-            // SMTP overrides stay COSMIC-local
             Message::SetupSmtpServerChanged(v) => {
-                self.setup_smtp_server = v;
+                self.setup_mut().update(SetupInput::SetField(FieldId::SmtpServer, v));
             }
             Message::SetupSmtpPortChanged(v) => {
-                self.setup_smtp_port = v;
+                self.setup_mut().update(SetupInput::SetField(FieldId::SmtpPort, v));
             }
             Message::SetupSmtpUsernameChanged(v) => {
-                self.setup_smtp_username = v;
+                self.setup_mut().update(SetupInput::SetField(FieldId::SmtpUsername, v));
             }
             Message::SetupSmtpPasswordChanged(v) => {
-                self.setup_smtp_password = v;
+                self.setup_mut().update(SetupInput::SetField(FieldId::SmtpPassword, v));
             }
             Message::SetupSmtpStarttlsToggled(v) => {
-                self.setup_smtp_starttls = v;
+                self.setup_mut().update(SetupInput::SetToggle(FieldId::SmtpStarttls, v));
             }
 
             Message::SetupSubmit => {
@@ -78,19 +76,6 @@ impl AppModel {
                     SetupRequest::PasswordOnly { .. }
                 );
 
-                // Validate email addresses (COSMIC-local field, not in core model)
-                let email_addresses: Vec<String> = self
-                    .setup_email_addresses
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !is_password_only && email_addresses.is_empty() {
-                    self.setup_mut().error =
-                        Some("At least one email address is required for sending".into());
-                    return Task::none();
-                }
-
                 // Extract validated values from SetupModel
                 let server = self.setup().server.trim().to_string();
                 let username = self.setup().username.trim().to_string();
@@ -103,6 +88,13 @@ impl AppModel {
                     self.setup().label.trim().to_string()
                 };
 
+                // Parse comma-separated email addresses from core model
+                let email_addresses: Vec<String> = self.setup().email
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
                 // Determine account ID from request
                 let account_id = match &self.setup().request {
                     SetupRequest::Edit { account_id } => account_id.clone(),
@@ -110,42 +102,37 @@ impl AppModel {
                     SetupRequest::Full => new_account_id(),
                 };
 
-                // Build SMTP overrides (COSMIC-local fields)
-                let smtp_password_backend = if !self.setup_smtp_password.is_empty() {
-                    match neverlight_mail_core::keyring::set_smtp_password(&account_id, &self.setup_smtp_password) {
-                        Ok(()) => {
-                            log::info!("SMTP password stored in keyring");
-                            Some(PasswordBackend::Keyring)
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to store SMTP password in keyring: {}", e);
-                            Some(PasswordBackend::Plaintext {
-                                value: self.setup_smtp_password.clone(),
-                            })
-                        }
+                // Build SMTP overrides from core model fields
+                let smtp_pw = if is_password_only {
+                    None
+                } else if self.setup().smtp_password.is_empty() {
+                    // Edit mode: preserve existing SMTP password
+                    if let SetupRequest::Edit { account_id: ref aid } = self.setup().request {
+                        MultiAccountFileConfig::load()
+                            .ok()
+                            .flatten()
+                            .and_then(|m| m.accounts.iter().find(|a| a.id == *aid).map(|a| a.smtp.password.clone()))
+                            .flatten()
+                    } else {
+                        None
                     }
                 } else {
-                    None
+                    setup::store_smtp_password(&account_id, &self.setup().smtp_password)
                 };
-
-                let smtp_overrides = SmtpOverrides {
-                    server: if self.setup_smtp_server.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.setup_smtp_server.trim().to_string())
-                    },
-                    port: self.setup_smtp_port.trim().parse().ok(),
-                    username: if self.setup_smtp_username.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.setup_smtp_username.trim().to_string())
-                    },
-                    password: smtp_password_backend,
-                    use_starttls: Some(self.setup_smtp_starttls),
-                };
+                let smtp_overrides = self.setup().build_smtp_overrides(smtp_pw);
 
                 // Store IMAP password via shared helper
-                let password_backend = setup::store_password(&username, &server, &password);
+                let password_backend = if is_password_only || !password.is_empty() {
+                    setup::store_password(&username, &server, &password)
+                } else {
+                    // Edit mode: preserve existing password (handled by core's try_submit,
+                    // but COSMIC does its own persist, so look it up)
+                    MultiAccountFileConfig::load()
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.accounts.iter().find(|a| a.id == account_id).map(|a| a.password.clone()))
+                        .unwrap_or_else(|| setup::store_password(&username, &server, &password))
+                };
 
                 // Build file account config
                 let fac = FileAccountConfig {
@@ -212,7 +199,6 @@ impl AppModel {
                 }
 
                 self.setup_model = None;
-                self.setup_smtp_password.clear();
                 self.status_message = format!("{}: Connecting...", label);
 
                 let aid = account_id.clone();
@@ -283,7 +269,7 @@ impl AppModel {
         if !is_password_only {
             controls = controls
                 .push(
-                    widget::text_input("you@example.com, alias@example.com", &self.setup_email_addresses)
+                    widget::text_input("you@example.com, alias@example.com", &model.email)
                         .label("Email addresses (comma-separated)")
                         .on_input(Message::SetupEmailAddressesChanged),
                 )
@@ -296,24 +282,24 @@ impl AppModel {
             controls = controls
                 .push(widget::text::body("SMTP Settings (optional — defaults to IMAP)"))
                 .push(
-                    widget::text_input("smtp.example.com", &self.setup_smtp_server)
+                    widget::text_input("smtp.example.com", &model.smtp_server)
                         .label("SMTP Server")
                         .on_input(Message::SetupSmtpServerChanged),
                 )
                 .push(
-                    widget::text_input("587", &self.setup_smtp_port)
+                    widget::text_input("587", &model.smtp_port)
                         .label("SMTP Port")
                         .on_input(Message::SetupSmtpPortChanged),
                 )
                 .push(
-                    widget::text_input("smtp username", &self.setup_smtp_username)
+                    widget::text_input("smtp username", &model.smtp_username)
                         .label("SMTP Username")
                         .on_input(Message::SetupSmtpUsernameChanged),
                 )
                 .push(
                     widget::text_input::secure_input(
                         "SMTP password (blank = use IMAP password)",
-                        &self.setup_smtp_password,
+                        &model.smtp_password,
                         None::<Message>,
                         true,
                     )
@@ -322,7 +308,7 @@ impl AppModel {
                 )
                 .push(
                     widget::settings::item::builder("SMTP STARTTLS")
-                        .toggler(self.setup_smtp_starttls, Message::SetupSmtpStarttlsToggled),
+                        .toggler(model.smtp_starttls, Message::SetupSmtpStarttlsToggled),
                 );
         }
 

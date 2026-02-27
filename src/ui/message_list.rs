@@ -72,8 +72,7 @@ pub fn view<'a>(
                 String::new()
             };
 
-            let subject_text =
-                format!("{}{}{}{}", unread, star, thread_indicator, msg.subject);
+            let subject_text = format!("{}{}{}{}", unread, star, thread_indicator, msg.subject);
             let subject = widget::text::body(subject_text);
             let meta = widget::text::caption(format!("{} — {}", msg.from, msg.date));
 

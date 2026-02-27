@@ -134,16 +134,9 @@ pub struct AppModel {
     pub(super) compose_account_labels: Vec<String>,
     pub(super) compose_cached_from: Vec<String>,
 
-    // Setup dialog state — core fields live in SetupModel, SMTP/visibility are local
+    // Setup dialog state — core fields live in SetupModel, visibility is local
     pub(super) setup_model: Option<SetupModel>,
     pub(super) setup_password_visible: bool,
-    pub(super) setup_email_addresses: String,
-    // SMTP override fields (COSMIC-only, not in TUI)
-    pub(super) setup_smtp_server: String,
-    pub(super) setup_smtp_port: String,
-    pub(super) setup_smtp_username: String,
-    pub(super) setup_smtp_password: String,
-    pub(super) setup_smtp_starttls: bool,
 
     // DnD state
     pub(super) folder_drag_target: Option<usize>,
@@ -379,12 +372,6 @@ impl cosmic::Application for AppModel {
 
             setup_model: None,
             setup_password_visible: false,
-            setup_email_addresses: String::new(),
-            setup_smtp_server: String::new(),
-            setup_smtp_port: "587".into(),
-            setup_smtp_username: String::new(),
-            setup_smtp_password: String::new(),
-            setup_smtp_starttls: true,
 
             folder_drag_target: None,
             pending_body: None,
@@ -825,12 +812,6 @@ impl AppModel {
             Message::AccountAdd => {
                 self.setup_model = Some(SetupModel::from_config_needs(&ConfigNeedsInput::FullSetup));
                 self.setup_password_visible = false;
-                self.setup_email_addresses.clear();
-                self.setup_smtp_server.clear();
-                self.setup_smtp_port = "587".into();
-                self.setup_smtp_username.clear();
-                self.setup_smtp_password.clear();
-                self.setup_smtp_starttls = true;
             }
             Message::AccountEdit(ref id) => {
                 if let Some(acct) = self.accounts.iter().find(|a| &a.config.id == id) {
@@ -844,15 +825,13 @@ impl AppModel {
                             username: acct.config.username.clone(),
                             email: acct.config.email_addresses.join(", "),
                             starttls: acct.config.use_starttls,
+                            smtp_server: acct.config.smtp_overrides.server.clone().unwrap_or_default(),
+                            smtp_port: acct.config.smtp_overrides.port.map(|p| p.to_string()).unwrap_or_else(|| "587".into()),
+                            smtp_username: acct.config.smtp_overrides.username.clone().unwrap_or_default(),
+                            smtp_starttls: acct.config.smtp_overrides.use_starttls.unwrap_or(true),
                         },
                     ));
                     self.setup_password_visible = false;
-                    self.setup_email_addresses = acct.config.email_addresses.join(", ");
-                    self.setup_smtp_server = acct.config.smtp_overrides.server.clone().unwrap_or_default();
-                    self.setup_smtp_port = acct.config.smtp_overrides.port.map(|p| p.to_string()).unwrap_or_else(|| "587".into());
-                    self.setup_smtp_username = acct.config.smtp_overrides.username.clone().unwrap_or_default();
-                    self.setup_smtp_password.clear();
-                    self.setup_smtp_starttls = acct.config.smtp_overrides.use_starttls.unwrap_or(true);
                 }
             }
             Message::AccountRemove(ref id) => {
