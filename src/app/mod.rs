@@ -146,6 +146,9 @@ pub struct AppModel {
     /// Body view deferred until IMAP session is ready
     pub(super) pending_body: Option<usize>,
 
+    /// Auto-mark-read: suppressed when user manually toggles back to unread
+    pub(super) auto_read_suppressed: bool,
+
     // Pane layout
     pub(super) panes: pane_grid::State<PaneKind>,
 }
@@ -242,6 +245,9 @@ pub enum Message {
     FolderDragLeave,
 
     PaneResized(pane_grid::ResizeEvent),
+
+    /// Auto-mark-read: fires 5s after a message is displayed
+    AutoMarkRead(u64),
 
     ForceReconnect(AccountId),
     Refresh,
@@ -379,6 +385,7 @@ impl cosmic::Application for AppModel {
 
             folder_drag_target: None,
             pending_body: None,
+            auto_read_suppressed: false,
 
             panes,
         };
@@ -708,6 +715,7 @@ impl cosmic::Application for AppModel {
             // Flag / move actions
             Message::ToggleRead(_)
             | Message::ToggleStar(_)
+            | Message::AutoMarkRead(_)
             | Message::Trash(_)
             | Message::Archive(_)
             | Message::DragMessageToFolder { .. }

@@ -12,8 +12,24 @@ impl AppModel {
             Message::ViewBody(index) => {
                 self.selected_message = Some(index);
                 self.pending_body = None;
+                self.auto_read_suppressed = false;
 
-                if let Some(msg) = self.messages.get(index) {
+                // Schedule auto-mark-read after 5 seconds if unread
+                let auto_read_task = if self
+                    .messages
+                    .get(index)
+                    .is_some_and(|m| !m.is_read)
+                {
+                    let envelope_hash = self.messages[index].envelope_hash;
+                    cosmic::task::future(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        Message::AutoMarkRead(envelope_hash)
+                    })
+                } else {
+                    Task::none()
+                };
+
+                let body_task = if let Some(msg) = self.messages.get(index) {
                     let envelope_hash = msg.envelope_hash;
                     let account_id = self
                         .account_for_mailbox(msg.mailbox_hash)
@@ -28,13 +44,13 @@ impl AppModel {
                             );
                             log::error!("{}", err);
                             self.status_message = err;
-                            return Task::none();
+                            return auto_read_task;
                         };
                         let cache = cache.clone();
                         let session = self.session_for_mailbox(msg.mailbox_hash)
                             .or_else(|| self.active_session());
                         self.status_message = "Loading message...".into();
-                        return cosmic::task::future(async move {
+                        cosmic::task::future(async move {
                             // Unified cache-first: try cache (includes attachments)
                             if let Ok(Some((md_body, plain_body, attachments))) =
                                 cache.load_body(account_id.clone(), envelope_hash).await
@@ -66,25 +82,30 @@ impl AppModel {
                                 // Session not ready yet — signal deferral
                                 Message::BodyDeferred
                             }
-                        });
+                        })
+                    } else {
+                        // No-cache fallback: direct IMAP fetch
+                        let session = self.session_for_mailbox(msg.mailbox_hash)
+                            .or_else(|| self.active_session());
+                        if let Some(session) = session {
+                            self.status_message = "Loading message...".into();
+                            cosmic::task::future(async move {
+                                Message::BodyLoaded(
+                                    session.fetch_body(EnvelopeHash(envelope_hash)).await,
+                                )
+                            })
+                        } else {
+                            // No cache, no session — defer until connected
+                            self.pending_body = Some(index);
+                            self.status_message = "Connecting...".into();
+                            Task::none()
+                        }
                     }
+                } else {
+                    Task::none()
+                };
 
-                    // No-cache fallback: direct IMAP fetch
-                    let session = self.session_for_mailbox(msg.mailbox_hash)
-                        .or_else(|| self.active_session());
-                    if let Some(session) = session {
-                        self.status_message = "Loading message...".into();
-                        return cosmic::task::future(async move {
-                            Message::BodyLoaded(
-                                session.fetch_body(EnvelopeHash(envelope_hash)).await,
-                            )
-                        });
-                    }
-
-                    // No cache, no session — defer until connected
-                    self.pending_body = Some(index);
-                    self.status_message = "Connecting...".into();
-                }
+                return cosmic::task::batch(vec![body_task, auto_read_task]);
             }
 
             Message::BodyDeferred => {

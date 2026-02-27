@@ -7,10 +7,28 @@ use super::{AppModel, Message};
 impl AppModel {
     pub(super) fn handle_actions(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::AutoMarkRead(envelope_hash) => {
+                if self.auto_read_suppressed {
+                    return Task::none();
+                }
+                let still_selected = self
+                    .selected_message
+                    .and_then(|i| self.messages.get(i))
+                    .is_some_and(|m| m.envelope_hash == envelope_hash && !m.is_read);
+                if still_selected {
+                    let index = self.selected_message.unwrap();
+                    return self.dispatch(Message::ToggleRead(index));
+                }
+            }
+
             Message::ToggleRead(index) => {
                 if let Some(msg) = self.messages.get_mut(index) {
                     let prev_flags = store::flags_to_u8(msg.is_read, msg.is_starred);
                     let new_read = !msg.is_read;
+                    // If user manually marks unread, suppress auto-read for this viewing
+                    if !new_read {
+                        self.auto_read_suppressed = true;
+                    }
                     msg.is_read = new_read;
                     let envelope_hash = msg.envelope_hash;
                     let mailbox_hash = msg.mailbox_hash;
