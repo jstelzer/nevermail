@@ -7,7 +7,7 @@ description = "A COSMIC desktop email client"
 
 [dependencies]
 # Core email engine
-neverlight-mail-core = { path = "../neverlight-mail-core" }
+neverlight-mail-core = { version = "0.0.3" }
 
 # COSMIC UI framework
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
