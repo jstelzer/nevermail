@@ -1,6 +1,6 @@
 use cosmic::app::Task;
-use nevermail_core::{EnvelopeHash, FlagOp, Flag, MailboxHash};
-use nevermail_core::store;
+use neverlight_mail_core::{EnvelopeHash, FlagOp, Flag, MailboxHash};
+use neverlight_mail_core::store;
 
 use super::{AppModel, Message};
 

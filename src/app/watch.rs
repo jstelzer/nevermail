@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use cosmic::app::Task;
 use futures::{SinkExt, StreamExt};
-use nevermail_core::{BackendEvent, RefreshEventKind, Flag};
-use nevermail_core::imap::ImapSession;
-use nevermail_core::store;
+use neverlight_mail_core::{BackendEvent, RefreshEventKind, Flag};
+use neverlight_mail_core::imap::ImapSession;
+use neverlight_mail_core::store;
 
 use super::{AppModel, ConnectionState, ImapWatchEvent, Message};
 

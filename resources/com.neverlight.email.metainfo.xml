@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>com.neverlight.email</id>
 
-  <name>Nevermail</name>
+  <name>Neverlight Mail</name>
   <summary>COSMIC desktop email client</summary>
   <description>
     <p>
@@ -17,15 +17,15 @@
 
   <launchable type="desktop-id">com.neverlight.email.desktop</launchable>
 
-  <url type="homepage">https://github.com/jstelzer/nevermail</url>
-  <url type="bugtracker">https://github.com/jstelzer/nevermail/issues</url>
+  <url type="homepage">https://github.com/jstelzer/neverlight-mail</url>
+  <url type="bugtracker">https://github.com/jstelzer/neverlight-mail/issues</url>
 
   <developer id="com.neverlight">
     <name>Neverlight</name>
   </developer>
 
   <provides>
-    <binary>nevermail</binary>
+    <binary>neverlight-mail</binary>
   </provides>
 
   <requires>

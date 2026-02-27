@@ -4,7 +4,7 @@ use cosmic::widget::{image, markdown};
 use cosmic::Element;
 
 use crate::app::Message;
-use nevermail_core::models::{AttachmentData, MessageSummary};
+use neverlight_mail_core::models::{AttachmentData, MessageSummary};
 
 /// Render the message preview pane with an action toolbar when a message is selected.
 pub fn view<'a>(

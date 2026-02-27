@@ -9,18 +9,18 @@ release: build
     cargo build --release
 
 build:
-    cargo clippy --bin "nevermail" -p nevermail
+    cargo clippy --bin "neverlight-mail" -p neverlight-mail
     cargo build
     cargo test
 
 reset:
-    rm ~/.local/share/nevermail/*.db
+    rm ~/.local/share/neverlight-mail/*.db
 
 run:
     cargo run
 
 install: release
-    install -Dm755 target/release/nevermail {{bin_dir}}/nevermail
+    install -Dm755 target/release/neverlight-mail {{bin_dir}}/neverlight-mail
     install -Dm644 resources/{{app_id}}.desktop {{app_dir}}/{{app_id}}.desktop
     install -Dm644 resources/{{app_id}}.metainfo.xml {{metainfo_dir}}/{{app_id}}.metainfo.xml
     for size in 16 32 48 64 128 256 512; do \
@@ -31,7 +31,7 @@ install: release
     -update-desktop-database {{app_dir}}
 
 uninstall:
-    rm -f {{bin_dir}}/nevermail
+    rm -f {{bin_dir}}/neverlight-mail
     rm -f {{app_dir}}/{{app_id}}.desktop
     rm -f {{metainfo_dir}}/{{app_id}}.metainfo.xml
     for size in 16 32 48 64 128 256 512; do \
@@ -42,8 +42,8 @@ uninstall:
 
 icons:
     cd images && for size in 512 256 128 64 48 32 16; do \
-        magick nevermail.png -resize ${size}x${size} nevermail-${size}.png; \
+        magick neverlight-mail.png -resize ${size}x${size} neverlight-mail-${size}.png; \
     done
     for size in 16 32 48 64 128 256 512; do \
-        cp images/nevermail-${size}.png resources/icons/hicolor/${size}x${size}/apps/{{app_id}}.png; \
+        cp images/neverlight-mail-${size}.png resources/icons/hicolor/${size}x${size}/apps/{{app_id}}.png; \
     done

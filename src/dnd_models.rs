@@ -28,15 +28,15 @@ pub struct DraggedMessage {
     pub source_mailbox: u64,
 }
 
-const NEVERMAIL_MIME: &str = "application/x-nevermail-message";
+const NEVERLIGHT_MAIL_MIME: &str = "application/x-neverlight-mail-message";
 
 impl AsMimeTypes for DraggedMessage {
     fn available(&self) -> Cow<'static, [String]> {
-        Cow::Owned(vec![NEVERMAIL_MIME.to_string()])
+        Cow::Owned(vec![NEVERLIGHT_MAIL_MIME.to_string()])
     }
 
     fn as_bytes(&self, mime_type: &str) -> Option<Cow<'static, [u8]>> {
-        if mime_type == NEVERMAIL_MIME {
+        if mime_type == NEVERLIGHT_MAIL_MIME {
             let s = format!("{}:{}", self.envelope_hash, self.source_mailbox);
             Some(Cow::Owned(s.into_bytes()))
         } else {
@@ -47,7 +47,7 @@ impl AsMimeTypes for DraggedMessage {
 
 impl AllowedMimeTypes for DraggedMessage {
     fn allowed() -> Cow<'static, [String]> {
-        Cow::Owned(vec![NEVERMAIL_MIME.to_string()])
+        Cow::Owned(vec![NEVERLIGHT_MAIL_MIME.to_string()])
     }
 }
 
@@ -99,13 +99,13 @@ mod tests {
 
         // Serialize
         let available = msg.available();
-        assert_eq!(available.as_ref(), &[NEVERMAIL_MIME]);
-        let bytes = msg.as_bytes(NEVERMAIL_MIME).unwrap();
+        assert_eq!(available.as_ref(), &[NEVERLIGHT_MAIL_MIME]);
+        let bytes = msg.as_bytes(NEVERLIGHT_MAIL_MIME).unwrap();
         assert_eq!(bytes.as_ref(), b"12345:67890");
 
         // Deserialize
         let parsed =
-            DraggedMessage::try_from((bytes.into_owned(), NEVERMAIL_MIME.into())).unwrap();
+            DraggedMessage::try_from((bytes.into_owned(), NEVERLIGHT_MAIL_MIME.into())).unwrap();
         assert_eq!(parsed.envelope_hash, 12345);
         assert_eq!(parsed.source_mailbox, 67890);
     }
@@ -122,20 +122,20 @@ mod tests {
     #[test]
     fn dragged_message_try_from_missing_separator() {
         let data = b"12345".to_vec();
-        assert!(DraggedMessage::try_from((data, NEVERMAIL_MIME.into())).is_err());
+        assert!(DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).is_err());
     }
 
     #[test]
     fn dragged_message_try_from_non_numeric() {
         let data = b"abc:def".to_vec();
-        assert!(DraggedMessage::try_from((data, NEVERMAIL_MIME.into())).is_err());
+        assert!(DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).is_err());
     }
 
     #[test]
     fn dragged_message_try_from_large_values() {
         let max = u64::MAX;
         let data = format!("{max}:{max}").into_bytes();
-        let parsed = DraggedMessage::try_from((data, NEVERMAIL_MIME.into())).unwrap();
+        let parsed = DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).unwrap();
         assert_eq!(parsed.envelope_hash, max);
         assert_eq!(parsed.source_mailbox, max);
     }
@@ -143,6 +143,6 @@ mod tests {
     #[test]
     fn dragged_message_allowed_mime() {
         let allowed = DraggedMessage::allowed();
-        assert_eq!(allowed.as_ref(), &[NEVERMAIL_MIME]);
+        assert_eq!(allowed.as_ref(), &[NEVERLIGHT_MAIL_MIME]);
     }
 }

@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=Nevermail
+Name=Neverlight Mail
 Comment=COSMIC desktop email client
-Exec=nevermail
+Exec=neverlight-mail
 Icon=com.neverlight.email
 Terminal=false
 Type=Application

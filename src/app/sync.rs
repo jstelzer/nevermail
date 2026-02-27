@@ -1,7 +1,7 @@
 use cosmic::app::Task;
-use nevermail_core::MailboxHash;
-use nevermail_core::imap::ImapSession;
-use nevermail_core::store::DEFAULT_PAGE_SIZE;
+use neverlight_mail_core::MailboxHash;
+use neverlight_mail_core::imap::ImapSession;
+use neverlight_mail_core::store::DEFAULT_PAGE_SIZE;
 
 use super::{AppModel, ConnectionState, Message};
 

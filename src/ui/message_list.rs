@@ -5,7 +5,7 @@ use cosmic::widget;
 use cosmic::Element;
 
 use crate::app::Message;
-use nevermail_core::models::MessageSummary;
+use neverlight_mail_core::models::MessageSummary;
 
 use crate::dnd_models::DraggedMessage;
 

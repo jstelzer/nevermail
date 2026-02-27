@@ -2,11 +2,11 @@ use cosmic::app::Task;
 use cosmic::widget;
 use cosmic::Element;
 
-use nevermail_core::config::{
+use neverlight_mail_core::config::{
     AccountConfig, FileAccountConfig, MultiAccountFileConfig, PasswordBackend, SmtpConfig,
     SmtpOverrides, new_account_id,
 };
-use nevermail_core::imap::ImapSession;
+use neverlight_mail_core::imap::ImapSession;
 
 use super::{AccountState, AppModel, ConnectionState, Message};
 
@@ -101,7 +101,7 @@ impl AppModel {
                 // Build SMTP overrides
                 // Store SMTP password in keyring if provided
                 let smtp_password_backend = if !self.setup_smtp_password.is_empty() {
-                    match nevermail_core::keyring::set_smtp_password(&account_id, &self.setup_smtp_password) {
+                    match neverlight_mail_core::keyring::set_smtp_password(&account_id, &self.setup_smtp_password) {
                         Ok(()) => {
                             log::info!("SMTP password stored in keyring");
                             Some(PasswordBackend::Keyring)
@@ -135,7 +135,7 @@ impl AppModel {
 
                 // Try keyring first; fall back to plaintext on failure
                 let password_backend =
-                    match nevermail_core::keyring::set_password(&username, &server, &password) {
+                    match neverlight_mail_core::keyring::set_password(&username, &server, &password) {
                         Ok(()) => {
                             log::info!("Password stored in keyring");
                             PasswordBackend::Keyring

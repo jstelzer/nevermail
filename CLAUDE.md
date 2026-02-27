@@ -1,43 +1,25 @@
-# Claude Context: Nevermail (cosmic-email)
+# Claude Context: Neverlight Mail (cosmic-email)
 
 **Last Updated:** 2026-02-25
 
 ## What This Is
 
-Nevermail is a COSMIC desktop email client built on:
+Neverlight Mail is a COSMIC desktop email client built on:
 - **libcosmic** (git, HEAD) — COSMIC UI framework (iced fork)
-- **melib 0.8.13** — Mail engine from the meli project (IMAP, MIME parsing, envelope handling)
+- **neverlight-mail-core** — Headless email engine (IMAP, SMTP, MIME, cache). See [neverlight-mail-core/CLAUDE.md](../neverlight-mail-core/CLAUDE.md) for engine internals and version pinning.
 
 Target server: Runbox (mail.runbox.com:993, implicit TLS). Should work with any standard IMAP server.
 
-## Critical: Version Pinning
-
-melib 0.8.13's `imap` feature depends on `imap-codec` and `imap-types`. Newer alpha versions of these crates introduced a breaking change (missing `modifiers` field) that prevents compilation.
-
-**The lockfile pins these to working versions:**
-- `imap-codec = 2.0.0-alpha.4`
-- `imap-types = 2.0.0-alpha.4`
-
-**DO NOT run `cargo update` without verifying these pins are preserved.** If they drift, re-pin with:
-```bash
-cargo update -p imap-codec --precise 2.0.0-alpha.4
-cargo update -p imap-types --precise 2.0.0-alpha.4
-```
-
-This is an upstream melib bug. Monitor melib releases for a fix.
-
 ## Architecture
 
-This is a Cargo workspace with two crates:
-
-- **nevermail-core** — Headless email engine (zero COSMIC deps). Library crate.
-- **nevermail** (root) — COSMIC desktop GUI. Binary crate, depends on nevermail-core.
+- **neverlight-mail-core** — Headless email engine (zero COSMIC deps). Library crate.
+- **neverlight-mail** (root) — COSMIC desktop GUI. Binary crate, depends on neverlight-mail-core.
 
 ```
-nevermail/                          (workspace root)
+neverlight-mail/                    (workspace root)
 ├── Cargo.toml                      (workspace + GUI binary package)
 ├── Cargo.lock                      (shared lockfile)
-├── nevermail-core/
+├── neverlight-mail-core/
 │   ├── Cargo.toml                  (lib: melib, lettre, rusqlite, keyring, ...)
 │   ├── src/
 │   │   ├── lib.rs                  (pub mod + melib re-exports)
@@ -76,7 +58,7 @@ nevermail/                          (workspace root)
 └── .github/workflows/ci.yml
 ```
 
-**Import conventions:** GUI code imports from `nevermail_core::` (config, imap, models, store, etc.) and `crate::` (dnd_models, app, ui). Core re-exports key melib types (`EnvelopeHash`, `MailboxHash`, `FlagOp`, `Flag`, `BackendEvent`, `RefreshEventKind`) so the GUI never depends on melib directly.
+**Import conventions:** GUI code imports from `neverlight_mail_core::` (config, imap, models, store, etc.) and `crate::` (dnd_models, app, ui). Core re-exports key melib types (`EnvelopeHash`, `MailboxHash`, `FlagOp`, `Flag`, `BackendEvent`, `RefreshEventKind`) so the GUI never depends on melib directly.
 
 ## Design Principles
 
@@ -130,11 +112,11 @@ Walks the attachment tree recursively looking for text/plain and text/html parts
 
 Environment variables, no UI prompt:
 ```bash
-export NEVERMAIL_SERVER=mail.runbox.com
-export NEVERMAIL_PORT=993        # optional, default 993
-export NEVERMAIL_USER=you@runbox.com
-export NEVERMAIL_PASSWORD=yourpassword
-export NEVERMAIL_STARTTLS=false  # optional, default false (implicit TLS)
+export NEVERLIGHT_MAIL_SERVER=mail.runbox.com
+export NEVERLIGHT_MAIL_PORT=993        # optional, default 993
+export NEVERLIGHT_MAIL_USER=you@runbox.com
+export NEVERLIGHT_MAIL_PASSWORD=yourpassword
+export NEVERLIGHT_MAIL_STARTTLS=false  # optional, default false (implicit TLS)
 ```
 
 Config::from_env() panics with a helpful message if required vars are missing.

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="images/nevermail-128.png" alt="Nevermail icon" />
+  <img src="images/neverlight-mail-128.png" alt="Neverlight Mail icon" />
 </p>
 
-# Nevermail
+# Neverlight Mail
 
 A COSMIC desktop email client for Linux, built in Rust.
 
@@ -11,7 +11,7 @@ Built for users who prefer native, privacy-respecting desktop software over webm
 **Status:** Alpha — single-account IMAP client with compose, search, threading, drag-and-drop, and HTML rendering. Daily-driveable on standard IMAP providers.
 
 <p align="center">
-  <img src="images/screenshot.png" alt="Nevermail screenshot" width="800" />
+  <img src="images/screenshot.png" alt="Neverlight Mail screenshot" width="800" />
 </p>
 
 ## Features
@@ -93,11 +93,11 @@ Data flows: IMAP (via melib) → domain models → SQLite cache → COSMIC widge
 
 ### HTML rendering: no web engine
 
-Most email today is HTML. Most email clients embed a full web engine (WebKit, Chromium, Gecko) to render it. Nevermail doesn't.
+Most email today is HTML. Most email clients embed a full web engine (WebKit, Chromium, Gecko) to render it. Neverlight Mail doesn't.
 
 HTML email is a surveillance vector. Tracking pixels, remote image loads, JavaScript, and CSS callbacks all phone home to tell senders when, where, and on what device you opened their message. An embedded browser makes all of that work by default. Turning it off becomes a game of whack-a-mole against an engine designed to fetch remote resources.
 
-Nevermail sidesteps this entirely. The rendering pipeline is:
+Neverlight Mail sidesteps this entirely. The rendering pipeline is:
 
 1. **html-safe-md** (a local crate wrapping ammonia + html2md) strips everything that isn't content — scripts, iframes, tracking pixels, remote images, event handlers, `<style>` blocks with external references — then converts the surviving HTML structure into markdown (headings, lists, links, emphasis)
 2. **iced's markdown widget** renders that as native rich text
@@ -135,16 +135,16 @@ cargo build --release  # release (~44M)
 
 ## Configuration
 
-On first run, a setup dialog prompts for IMAP server, username, and password. Credentials are stored in the OS keyring (gnome-keyring/libsecret) with a config file at `~/.config/nevermail/config.json`.
+On first run, a setup dialog prompts for IMAP server, username, and password. Credentials are stored in the OS keyring (gnome-keyring/libsecret) with a config file at `~/.config/neverlight-mail/config.json`.
 
 Environment variables override everything (useful for development/testing):
 
 ```sh
-export NEVERMAIL_SERVER=mail.runbox.com
-export NEVERMAIL_PORT=993
-export NEVERMAIL_USER=you@runbox.com
-export NEVERMAIL_PASSWORD=yourpassword
-export NEVERMAIL_STARTTLS=false
+export NEVERLIGHT_MAIL_SERVER=mail.runbox.com
+export NEVERLIGHT_MAIL_PORT=993
+export NEVERLIGHT_MAIL_USER=you@runbox.com
+export NEVERLIGHT_MAIL_PASSWORD=yourpassword
+export NEVERLIGHT_MAIL_STARTTLS=false
 ```
 
 ## Not yet supported
@@ -153,9 +153,9 @@ Are - OAuth2 (see below)
 
 ### A note on OAuth2 and Gmail
 
-Nevermail uses password authentication. Gmail requires a **restricted OAuth2 scope** (`https://mail.google.com/`) for IMAP access, which means a third-party security audit, annual re-verification, and a process designed for companies — not indie projects.
+Neverlight Mail uses password authentication. Gmail requires a **restricted OAuth2 scope** (`https://mail.google.com/`) for IMAP access, which means a third-party security audit, annual re-verification, and a process designed for companies — not indie projects.
 
-Nevermail targets standard IMAP providers (Runbox, Fastmail, Migadu, self-hosted, etc.) that work with normal credentials. The Rust ecosystem has the plumbing ([`oauth2-rs`](https://github.com/ramosbugs/oauth2-rs), melib's XOAUTH2 support) if it ever makes sense to pursue.
+Neverlight Mail targets standard IMAP providers (Runbox, Fastmail, Migadu, self-hosted, etc.) that work with normal credentials. The Rust ecosystem has the plumbing ([`oauth2-rs`](https://github.com/ramosbugs/oauth2-rs), melib's XOAUTH2 support) if it ever makes sense to pursue.
 
 ## License
 

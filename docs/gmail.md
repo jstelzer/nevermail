@@ -19,7 +19,7 @@ To get one:
 1. Enable 2-Step Verification on your Google account (you can't generate app
    passwords without it)
 2. Go to https://myaccount.google.com/apppasswords
-3. Pick a name ("Nevermail" or whatever), generate
+3. Pick a name ("Neverlight Mail" or whatever), generate
 4. Google shows you a 16-character code **once**. Copy it. You will never see
    it again.
 
@@ -54,7 +54,7 @@ virtual folders, but the names are unusual:
 | All Mail            | `[Gmail]/All Mail`        |
 | Archive             | `[Gmail]/All Mail` (yes, same thing) |
 
-Nevermail finds Trash by looking for a folder with `\Trash` in the name or
+Neverlight Mail finds Trash by looking for a folder with `\Trash` in the name or
 path. Gmail's `[Gmail]/Trash` should match. Sent/Drafts might not get special
 treatment — they'll just appear as regular folders in the sidebar.
 
@@ -65,7 +65,7 @@ folder trees.
 ## Hoop 4: "All Mail" is a trap
 
 Gmail exposes `[Gmail]/All Mail`, which is every message that hasn't been
-permanently deleted. If you select it, Nevermail will try to sync every
+permanently deleted. If you select it, Neverlight Mail will try to sync every
 message in your account. If you've had Gmail since 2004, that's potentially
 hundreds of thousands of envelopes.
 
@@ -80,15 +80,15 @@ Don't open All Mail. Just don't.
 Gmail's IMAP server is `imap.gmail.com:993`. But the SMTP server is
 `smtp.gmail.com` on port `587` (STARTTLS).
 
-Nevermail derives SMTP config from your IMAP config — it reuses the same
+Neverlight Mail derives SMTP config from your IMAP config — it reuses the same
 server hostname by default. For Gmail, you need to override:
 
 ```bash
-export NEVERMAIL_SMTP_SERVER=smtp.gmail.com
-export NEVERMAIL_SMTP_PORT=587
+export NEVERLIGHT_MAIL_SMTP_SERVER=smtp.gmail.com
+export NEVERLIGHT_MAIL_SMTP_PORT=587
 ```
 
-Or in `~/.config/nevermail/config.json`, the SMTP settings aren't persisted
+Or in `~/.config/neverlight-mail/config.json`, the SMTP settings aren't persisted
 yet — you'll need the env vars. The app password works for both IMAP and SMTP,
 at least.
 
@@ -111,7 +111,7 @@ minutes to an hour.
 
 In most IMAP servers, moving a message to Trash is straightforward. In Gmail,
 deleting a message from any label just removes the label. To actually trash a
-message, you have to move it to `[Gmail]/Trash`. Nevermail does this — but if
+message, you have to move it to `[Gmail]/Trash`. Neverlight Mail does this — but if
 Gmail's IMAP layer decides to interpret the operation as "remove label" instead
 of "move to trash", the message just vanishes from the current view and
 reappears in All Mail. Confusing.
@@ -120,7 +120,7 @@ reappears in All Mail. Confusing.
 
 On most IMAP servers, archive means "move to Archive folder." On Gmail,
 archiving means "remove the Inbox label." The message stays in All Mail. If
-you're in Nevermail and you archive something, it'll disappear from Inbox but
+you're in Neverlight Mail and you archive something, it'll disappear from Inbox but
 won't show up in a dedicated Archive folder — because Gmail doesn't have one.
 It's just All Mail.
 
@@ -139,19 +139,19 @@ If you've survived the above:
 
 **Environment overrides for SMTP:**
 ```bash
-export NEVERMAIL_SMTP_SERVER=smtp.gmail.com
-export NEVERMAIL_SMTP_PORT=587
+export NEVERLIGHT_MAIL_SMTP_SERVER=smtp.gmail.com
+export NEVERLIGHT_MAIL_SMTP_PORT=587
 ```
 
 **Or the full env-var route:**
 ```bash
-export NEVERMAIL_SERVER=imap.gmail.com
-export NEVERMAIL_PORT=993
-export NEVERMAIL_USER=you@gmail.com
-export NEVERMAIL_PASSWORD=abcd-efgh-ijkl-mnop
-export NEVERMAIL_STARTTLS=false
-export NEVERMAIL_SMTP_SERVER=smtp.gmail.com
-export NEVERMAIL_SMTP_PORT=587
+export NEVERLIGHT_MAIL_SERVER=imap.gmail.com
+export NEVERLIGHT_MAIL_PORT=993
+export NEVERLIGHT_MAIL_USER=you@gmail.com
+export NEVERLIGHT_MAIL_PASSWORD=abcd-efgh-ijkl-mnop
+export NEVERLIGHT_MAIL_STARTTLS=false
+export NEVERLIGHT_MAIL_SMTP_SERVER=smtp.gmail.com
+export NEVERLIGHT_MAIL_SMTP_PORT=587
 ```
 
 ---
@@ -164,7 +164,7 @@ Some of this pain is Gmail being Gmail — that never gets better:
 - All Mail footgun (hoop 4)
 - Rate limiting (hoop 6)
 
-Some of it is Nevermail not having the plumbing yet — that gets better:
+Some of it is Neverlight Mail not having the plumbing yet — that gets better:
 - **Split IMAP/SMTP config** is on the roadmap. Once it lands, the SMTP
   override env vars go away and you just fill in two servers in the setup
   dialog like a normal person.
@@ -173,7 +173,7 @@ Some of it is Nevermail not having the plumbing yet — that gets better:
   files.
 
 The goal isn't to make Gmail a first-class experience — it's to make
-Nevermail flexible enough that Gmail falls out as a side effect of doing
+Neverlight Mail flexible enough that Gmail falls out as a side effect of doing
 standard IMAP properly.
 
 ## On providers
