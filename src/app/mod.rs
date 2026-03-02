@@ -46,7 +46,7 @@ impl cosmic::Application for AppModel {
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
         // Open cache synchronously (just opens a file, fast)
-        let cache = match CacheHandle::open() {
+        let cache = match CacheHandle::open("cosmic") {
             Ok(c) => {
                 log::info!("Cache opened successfully");
                 Some(c)
