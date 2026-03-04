@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use cosmic::app::Core;
 use cosmic::widget::{image, markdown, pane_grid, text_editor};
@@ -39,6 +40,32 @@ pub enum Phase {
     Refreshing,
     Searching,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    Move,
+    Flag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAction {
+    Refresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableActionError {
+    pub action: ActionKind,
+    pub message: String,
+    pub retry: RetryAction,
+    pub envelope_hash: Option<u64>,
+    pub mailbox_hash: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorSurface {
+    RecoverableAction(RecoverableActionError),
+    Status { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +167,7 @@ pub struct AppModel {
     pub(super) body_abort: Option<AbortHandle>,
 
     pub(super) status_message: String,
+    pub(super) error_surface: Option<ErrorSurface>,
     pub(super) phase: Phase,
     /// Monotonic epochs by lane.
     pub(super) folder_epoch: u64,
@@ -153,6 +181,8 @@ pub struct AppModel {
     pub(super) refresh_in_flight: bool,
     pub(super) refresh_pending: bool,
     pub(super) refresh_accounts_outstanding: HashSet<AccountId>,
+    pub(super) refresh_started_at: Option<Instant>,
+    pub(super) refresh_timeout_reported: bool,
     pub(super) mutation_in_flight: bool,
     pub(super) flag_in_flight: bool,
     pub(super) pending_move_intent: Option<PendingMoveIntent>,
@@ -161,6 +191,8 @@ pub struct AppModel {
     pub(super) stale_apply_drop_count: u64,
     pub(super) toc_drift_count: u64,
     pub(super) postcondition_failure_count: u64,
+    pub(super) refresh_timeout_count: u64,
+    pub(super) refresh_stuck_count: u64,
 
     // Search state
     pub(super) search_active: bool,
@@ -202,6 +234,7 @@ pub struct AppModel {
 
     // Pane layout
     pub(super) panes: pane_grid::State<PaneKind>,
+    pub(super) diagnostics_collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -331,6 +364,7 @@ pub enum Message {
     FolderDragLeave,
 
     PaneResized(pane_grid::ResizeEvent),
+    ToggleDiagnostics,
 
     /// Auto-mark-read: fires 5s after a message is displayed
     AutoMarkRead(u64),

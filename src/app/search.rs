@@ -87,6 +87,7 @@ impl AppModel {
                 } else {
                     self.status_message = format!("Search: no results for \"{}\"", query);
                 }
+                self.clear_error_surface();
                 self.phase = Phase::Idle;
             }
             Message::SearchResultsLoaded {
@@ -100,9 +101,8 @@ impl AppModel {
                 }
                 self.search_abort = None;
                 self.search_focused = false;
-                self.status_message = format!("Search failed: {}", e);
                 log::error!("Search failed: {}", e);
-                self.phase = Phase::Error;
+                self.set_status_error(format!("Search failed: {}", e));
             }
             Message::SearchClear => {
                 if self.search_active {

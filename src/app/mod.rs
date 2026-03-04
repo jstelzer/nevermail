@@ -98,6 +98,7 @@ impl cosmic::Application for AppModel {
             message_abort: None,
             body_abort: None,
             status_message: "Starting up...".into(),
+            error_surface: None,
             phase: Phase::Loading,
             folder_epoch: 0,
             message_epoch: 0,
@@ -109,6 +110,8 @@ impl cosmic::Application for AppModel {
             refresh_in_flight: false,
             refresh_pending: false,
             refresh_accounts_outstanding: HashSet::new(),
+            refresh_started_at: None,
+            refresh_timeout_reported: false,
             mutation_in_flight: false,
             flag_in_flight: false,
             pending_move_intent: None,
@@ -116,6 +119,8 @@ impl cosmic::Application for AppModel {
             stale_apply_drop_count: 0,
             toc_drift_count: 0,
             postcondition_failure_count: 0,
+            refresh_timeout_count: 0,
+            refresh_stuck_count: 0,
 
             search_active: false,
             search_query: String::new(),
@@ -146,6 +151,7 @@ impl cosmic::Application for AppModel {
             auto_read_suppressed: false,
 
             panes,
+            diagnostics_collapsed: true,
         };
 
         let title_task = app.set_window_title("Nevermail".into());
@@ -342,6 +348,17 @@ impl cosmic::Application for AppModel {
                     self.active_account,
                     self.selected_folder,
                     self.folder_drag_target,
+                    crate::ui::sidebar::DiagnosticsState {
+                        collapsed: self.diagnostics_collapsed,
+                        phase: self.phase,
+                        selected_folder_evicted: self.selected_folder_evicted,
+                        stale_apply_drop_count: self.stale_apply_drop_count,
+                        toc_drift_count: self.toc_drift_count,
+                        postcondition_failure_count: self.postcondition_failure_count,
+                        refresh_timeout_count: self.refresh_timeout_count,
+                        refresh_stuck_count: self.refresh_stuck_count,
+                        error_surface: self.error_surface.as_ref(),
+                    },
                 ),
                 PaneKind::MessageList => crate::ui::message_list::view(
                     crate::ui::message_list::MessageListState {
@@ -508,12 +525,33 @@ impl cosmic::Application for AppModel {
                 self.save_layout();
                 Task::none()
             }
+            Message::ToggleDiagnostics => {
+                self.diagnostics_collapsed = !self.diagnostics_collapsed;
+                Task::none()
+            }
             Message::Noop => Task::none(),
         }
     }
 }
 
 impl AppModel {
+    pub(super) fn clear_error_surface(&mut self) {
+        self.error_surface = None;
+    }
+
+    pub(super) fn set_status_error(&mut self, message: String) {
+        self.error_surface = Some(ErrorSurface::Status {
+            message: message.clone(),
+        });
+        self.status_message = message;
+        self.phase = Phase::Error;
+    }
+
+    pub(super) fn set_recoverable_action_error(&mut self, error: RecoverableActionError) {
+        self.status_message = error.message.clone();
+        self.error_surface = Some(ErrorSurface::RecoverableAction(error));
+    }
+
     fn set_window_title(&self, title: String) -> cosmic::app::Task<Message> {
         self.core.set_title(self.core.main_window_id(), title)
     }

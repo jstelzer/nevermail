@@ -3,6 +3,7 @@ use futures::future::{AbortHandle, Abortable};
 use neverlight_mail_core::MailboxHash;
 use neverlight_mail_core::imap::ImapSession;
 use neverlight_mail_core::store::DEFAULT_PAGE_SIZE;
+use std::time::{Duration, Instant};
 
 use super::{AppModel, ConnectionState, Message, Phase};
 
@@ -33,6 +34,18 @@ fn mark_refresh_account_complete(
 ) -> bool {
     outstanding.remove(account_id);
     outstanding.is_empty()
+}
+
+const REFRESH_STUCK_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn refresh_has_timed_out(
+    refresh_started_at: Option<Instant>,
+    refresh_timeout_reported: bool,
+) -> bool {
+    if refresh_timeout_reported {
+        return false;
+    }
+    refresh_started_at.is_some_and(|started| started.elapsed() >= REFRESH_STUCK_TIMEOUT)
 }
 
 impl AppModel {
@@ -180,6 +193,7 @@ impl AppModel {
                 if let Some(idx) = self.account_index(&account_id) {
                     self.accounts[idx].session = Some(session.clone());
                     self.accounts[idx].conn_state = ConnectionState::Syncing;
+                    self.clear_error_surface();
 
                     let had_cached_folders = !self.accounts[idx].folders.is_empty();
 
@@ -240,8 +254,7 @@ impl AppModel {
                     }
 
                     if !has_folders {
-                        self.status_message = format!("{}: Connection failed: {}", label, e);
-                        self.phase = Phase::Error;
+                        self.set_status_error(format!("{}: Connection failed: {}", label, e));
                     } else {
                         self.status_message = format!(
                             "{}: {} folders (offline — {})",
@@ -270,6 +283,8 @@ impl AppModel {
                     )
                 {
                     self.refresh_in_flight = false;
+                    self.refresh_started_at = None;
+                    self.refresh_timeout_reported = false;
                     self.phase = Phase::Idle;
                     refresh_completed = true;
                 }
@@ -277,6 +292,7 @@ impl AppModel {
                     self.accounts[idx].folders = folders;
                     self.accounts[idx].rebuild_folder_map();
                     self.accounts[idx].conn_state = ConnectionState::Connected;
+                    self.clear_error_surface();
                     self.status_message = format!(
                         "{}: {} folders",
                         self.accounts[idx].config.label,
@@ -397,7 +413,7 @@ impl AppModel {
                         );
                     }
                     log::error!("Folder sync failed for '{}': {}", label, e);
-                    self.phase = Phase::Error;
+                    self.set_status_error(self.status_message.clone());
                     if self.refresh_in_flight
                         && mark_refresh_account_complete(
                             &mut self.refresh_accounts_outstanding,
@@ -405,6 +421,8 @@ impl AppModel {
                         )
                     {
                         self.refresh_in_flight = false;
+                        self.refresh_started_at = None;
+                        self.refresh_timeout_reported = false;
                         if self.refresh_pending {
                             self.refresh_pending = false;
                             return self.dispatch(Message::Refresh);
@@ -444,6 +462,7 @@ impl AppModel {
                         acct.conn_state = ConnectionState::Connected;
                     }
                 }
+                self.clear_error_surface();
                 self.phase = Phase::Idle;
                 self.message_abort = None;
                 let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -517,7 +536,7 @@ impl AppModel {
                 }
                 self.status_message = format!("Sync failed: {}", e);
                 log::error!("Message sync failed: {}", e);
-                self.phase = Phase::Error;
+                self.set_status_error(self.status_message.clone());
             }
 
             Message::SelectFolder(acct_idx, folder_idx) => {
@@ -688,6 +707,15 @@ impl AppModel {
 
             Message::Refresh => {
                 if should_queue_refresh(self.refresh_in_flight) {
+                    if refresh_has_timed_out(self.refresh_started_at, self.refresh_timeout_reported) {
+                        self.refresh_timeout_reported = true;
+                        self.refresh_timeout_count = self.refresh_timeout_count.saturating_add(1);
+                        self.refresh_stuck_count = self.refresh_stuck_count.saturating_add(1);
+                        self.set_status_error(
+                            "Refresh appears stuck (timeout); keeping latest request queued."
+                                .into(),
+                        );
+                    }
                     self.refresh_pending = true;
                     self.status_message = "Refresh queued...".into();
                     return Task::none();
@@ -719,10 +747,15 @@ impl AppModel {
                 }
                 if !tasks.is_empty() {
                     self.refresh_in_flight = true;
+                    self.refresh_started_at = Some(Instant::now());
+                    self.refresh_timeout_reported = false;
                     self.phase = Phase::Refreshing;
+                    self.clear_error_surface();
                     self.status_message = "Refreshing...".into();
                     return cosmic::task::batch(tasks);
                 }
+                self.refresh_started_at = None;
+                self.refresh_timeout_reported = false;
                 self.phase = Phase::Idle;
             }
 
@@ -753,9 +786,11 @@ impl AppModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        mark_refresh_account_complete, should_apply_cached_messages, should_queue_refresh,
+        mark_refresh_account_complete, refresh_has_timed_out, should_apply_cached_messages,
+        should_queue_refresh,
     };
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn cached_messages_apply_when_epoch_and_context_match() {
@@ -833,5 +868,13 @@ mod tests {
         assert_eq!(outstanding.len(), 1);
         assert!(mark_refresh_account_complete(&mut outstanding, "acct-b"));
         assert!(outstanding.is_empty());
+    }
+
+    #[test]
+    fn refresh_timeout_detects_stuck_once_per_cycle() {
+        let started = Some(Instant::now() - Duration::from_secs(60));
+        assert!(refresh_has_timed_out(started, false));
+        assert!(!refresh_has_timed_out(started, true));
+        assert!(!refresh_has_timed_out(Some(Instant::now()), false));
     }
 }

@@ -3,7 +3,8 @@ use neverlight_mail_core::store;
 use neverlight_mail_core::{EnvelopeHash, Flag, FlagOp, MailboxHash};
 
 use super::{
-    AppModel, FlagIntentKind, Message, PendingFlagIntent, PendingMoveIntent, Phase,
+    ActionKind, AppModel, FlagIntentKind, Message, PendingFlagIntent, PendingMoveIntent,
+    Phase, RecoverableActionError, RetryAction,
 };
 
 fn move_postcondition_retry_message(result: &Result<bool, String>) -> Option<String> {
@@ -131,6 +132,7 @@ impl AppModel {
                 let mut tasks: Vec<Task<Message>> = Vec::new();
                 match result {
                     Ok(new_flags) => {
+                        self.clear_error_surface();
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
                             let Some(account_id) = self
@@ -162,7 +164,17 @@ impl AppModel {
                     }
                     Err(e) => {
                         log::error!("Flag operation failed: {}", e);
-                        self.status_message = format!("Flag update failed: {}", e);
+                        self.set_recoverable_action_error(RecoverableActionError {
+                            action: ActionKind::Flag,
+                            message: format!("Flag update failed: {}", e),
+                            retry: RetryAction::Refresh,
+                            envelope_hash: Some(envelope_hash),
+                            mailbox_hash: self
+                                .messages
+                                .iter()
+                                .find(|m| m.envelope_hash == envelope_hash)
+                                .map(|m| m.mailbox_hash),
+                        });
                         self.phase = Phase::Error;
 
                         // Revert optimistic UI to exact pre-op flags.
@@ -226,6 +238,7 @@ impl AppModel {
                 self.pending_move_epochs.remove(&envelope_hash);
                 match result {
                     Ok(()) => {
+                        self.clear_error_surface();
                         let Some(account_id) = self
                             .pending_move_restore
                             .get(&envelope_hash)
@@ -315,7 +328,13 @@ impl AppModel {
                             self.recompute_visible();
                         }
                         log::error!("Move operation failed: {}", e);
-                        self.status_message = format!("Move failed: {}", e);
+                        self.set_recoverable_action_error(RecoverableActionError {
+                            action: ActionKind::Move,
+                            message: format!("Move failed: {}", e),
+                            retry: RetryAction::Refresh,
+                            envelope_hash: Some(envelope_hash),
+                            mailbox_hash: Some(source_mailbox),
+                        });
                         self.phase = Phase::Error;
                         self.mutation_in_flight = false;
                         return self.try_run_next_move_intent();
@@ -346,11 +365,19 @@ impl AppModel {
                     if matches!(result, Ok(false)) {
                         self.toc_drift_count = self.toc_drift_count.saturating_add(1);
                     }
-                    self.status_message = message;
+                    self.set_recoverable_action_error(RecoverableActionError {
+                        action: ActionKind::Move,
+                        message,
+                        retry: RetryAction::Refresh,
+                        envelope_hash: Some(envelope_hash),
+                        mailbox_hash: Some(_source_mailbox),
+                    });
                     if let Err(e) = result {
                         log::warn!("Move postcondition check failed: {}", e);
                     }
                     tasks.push(self.dispatch(Message::Refresh));
+                } else {
+                    self.clear_error_surface();
                 }
                 if let Some(next) = self.pending_move_intent.take() {
                     tasks.push(self.dispatch(Message::RunMoveIntent(next)));

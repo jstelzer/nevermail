@@ -2,8 +2,20 @@ use cosmic::iced::Length;
 use cosmic::widget;
 use cosmic::Element;
 
-use crate::app::{AccountState, ConnectionState, Message};
+use crate::app::{AccountState, ConnectionState, ErrorSurface, Message, Phase};
 use crate::dnd_models::DraggedMessage;
+
+pub struct DiagnosticsState<'a> {
+    pub collapsed: bool,
+    pub phase: Phase,
+    pub selected_folder_evicted: bool,
+    pub stale_apply_drop_count: u64,
+    pub toc_drift_count: u64,
+    pub postcondition_failure_count: u64,
+    pub refresh_timeout_count: u64,
+    pub refresh_stuck_count: u64,
+    pub error_surface: Option<&'a ErrorSurface>,
+}
 
 /// Render the folder sidebar with multi-account sections.
 pub fn view<'a>(
@@ -11,6 +23,7 @@ pub fn view<'a>(
     active_account: Option<usize>,
     selected_folder: Option<usize>,
     drag_target: Option<usize>,
+    diagnostics: DiagnosticsState<'a>,
 ) -> Element<'a, Message> {
     let mut col = widget::column().spacing(4).padding(8);
 
@@ -164,10 +177,12 @@ pub fn view<'a>(
     let scrollable_folders = widget::scrollable(col).height(Length::Fill);
 
     let status_pill = status_pill_view(accounts, active_account);
+    let diagnostics_panel = diagnostics_view(diagnostics);
 
     widget::column()
         .push(scrollable_folders)
         .push(status_pill)
+        .push(diagnostics_panel)
         .height(Length::Fill)
         .into()
 }
@@ -217,4 +232,84 @@ fn status_pill_view<'a>(
     } else {
         pill.width(Length::Fill).into()
     }
+}
+
+fn diagnostics_view<'a>(state: DiagnosticsState<'a>) -> Element<'a, Message> {
+    let toggle_label = if state.collapsed {
+        "Diagnostics \u{25B6}"
+    } else {
+        "Diagnostics \u{25BC}"
+    };
+
+    let header = widget::button::text(toggle_label)
+        .on_press(Message::ToggleDiagnostics)
+        .width(Length::Fill);
+
+    if state.collapsed {
+        return widget::container(header)
+            .padding([4, 8])
+            .width(Length::Fill)
+            .class(cosmic::style::Container::Card)
+            .into();
+    }
+
+    let phase_label = match state.phase {
+        Phase::Idle => "idle",
+        Phase::Loading => "loading",
+        Phase::Refreshing => "refreshing",
+        Phase::Searching => "searching",
+        Phase::Error => "error",
+    };
+
+    let mut col = widget::column()
+        .spacing(2)
+        .push(header)
+        .push(widget::text::caption(format!("Phase: {}", phase_label)))
+        .push(widget::text::caption(format!(
+            "Stale drops: {}",
+            state.stale_apply_drop_count
+        )))
+        .push(widget::text::caption(format!("TOC drift: {}", state.toc_drift_count)))
+        .push(widget::text::caption(format!(
+            "Postcondition fails: {}",
+            state.postcondition_failure_count
+        )))
+        .push(widget::text::caption(format!(
+            "Refresh stuck/timeouts: {}/{}",
+            state.refresh_stuck_count, state.refresh_timeout_count
+        )));
+
+    if state.selected_folder_evicted {
+        col = col.push(widget::text::caption("Folder selection evicted"));
+    }
+
+    if let Some(err) = state.error_surface {
+        let line = match err {
+            ErrorSurface::RecoverableAction(e) => {
+                format!("Retryable: {}", truncate(&e.message, 56))
+            }
+            ErrorSurface::Status { message } => {
+                format!("Status: {}", truncate(message, 56))
+            }
+        };
+        col = col.push(widget::text::caption(line));
+    }
+
+    widget::container(col)
+        .padding([4, 8])
+        .width(Length::Fill)
+        .class(cosmic::style::Container::Card)
+        .into()
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for ch in s.chars().take(max_len.saturating_sub(3)) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
 }
