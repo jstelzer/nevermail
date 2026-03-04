@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use cosmic::app::Core;
 use cosmic::widget::{image, markdown, pane_grid, text_editor};
+use futures::future::AbortHandle;
 
 use neverlight_mail_core::config::{AccountConfig, AccountId};
 use neverlight_mail_core::imap::ImapSession;
@@ -29,6 +30,15 @@ pub enum ConnectionState {
     Connected,
     Syncing,
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Idle,
+    Loading,
+    Refreshing,
+    Searching,
+    Error,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +107,32 @@ pub struct AppModel {
     pub(super) thread_sizes: HashMap<u64, usize>,
     /// Snapshot of optimistically removed messages for move rollback.
     pub(super) pending_move_restore: HashMap<u64, (MessageSummary, usize)>,
+    /// Latest flag operation epoch per envelope (stale completions are dropped).
+    pub(super) pending_flag_epochs: HashMap<u64, u64>,
+    /// Latest move operation epoch per envelope (stale completions are dropped).
+    pub(super) pending_move_epochs: HashMap<u64, u64>,
+    /// Abort handles for true in-flight cancellation of superseded lane operations.
+    pub(super) search_abort: Option<AbortHandle>,
+    pub(super) folder_abort: Option<AbortHandle>,
+    pub(super) message_abort: Option<AbortHandle>,
 
     pub(super) status_message: String,
+    pub(super) phase: Phase,
+    /// Monotonic epochs by lane.
+    pub(super) folder_epoch: u64,
+    pub(super) message_epoch: u64,
+    pub(super) search_epoch: u64,
+    pub(super) refresh_epoch: u64,
+    pub(super) mutation_epoch: u64,
+    pub(super) flag_epoch: u64,
+    /// Refresh lane coalescing state.
+    pub(super) refresh_in_flight: bool,
+    pub(super) refresh_pending: bool,
+    pub(super) refresh_accounts_outstanding: HashSet<AccountId>,
+    /// Diagnostics counters.
+    pub(super) stale_apply_drop_count: u64,
+    pub(super) toc_drift_count: u64,
+    pub(super) postcondition_failure_count: u64,
 
     // Search state
     pub(super) search_active: bool,
@@ -165,12 +199,24 @@ pub enum Message {
         account_id: AccountId,
         result: Result<Vec<Folder>, String>,
     },
-    CachedMessagesLoaded(Result<Vec<MessageSummary>, String>),
+    CachedMessagesLoaded {
+        account_id: AccountId,
+        mailbox_hash: u64,
+        offset: u32,
+        epoch: u64,
+        result: Result<Vec<MessageSummary>, String>,
+    },
     SyncFoldersComplete {
         account_id: AccountId,
+        epoch: u64,
         result: Result<Vec<Folder>, String>,
     },
-    SyncMessagesComplete(Result<(), String>),
+    SyncMessagesComplete {
+        account_id: AccountId,
+        mailbox_hash: u64,
+        epoch: u64,
+        result: Result<(), String>,
+    },
     LoadMoreMessages,
 
     // Flag/move actions
@@ -180,12 +226,21 @@ pub enum Message {
     Archive(usize),
     FlagOpComplete {
         envelope_hash: u64,
+        epoch: u64,
         prev_flags: u8,
         result: Result<u8, String>,
     },
     MoveOpComplete {
         envelope_hash: u64,
+        source_mailbox: u64,
+        epoch: u64,
         result: Result<(), String>,
+    },
+    MovePostconditionChecked {
+        envelope_hash: u64,
+        source_mailbox: u64,
+        epoch: u64,
+        result: Result<bool, String>,
     },
 
     // Keyboard navigation
@@ -221,7 +276,11 @@ pub enum Message {
     SearchActivate,
     SearchQueryChanged(String),
     SearchExecute,
-    SearchResultsLoaded(Result<Vec<MessageSummary>, String>),
+    SearchResultsLoaded {
+        query: String,
+        epoch: u64,
+        result: Result<Vec<MessageSummary>, String>,
+    },
     SearchClear,
 
     // Message-to-folder drag

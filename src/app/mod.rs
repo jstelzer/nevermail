@@ -89,7 +89,25 @@ impl cosmic::Application for AppModel {
             visible_indices: Vec::new(),
             thread_sizes: HashMap::new(),
             pending_move_restore: HashMap::new(),
+            pending_flag_epochs: HashMap::new(),
+            pending_move_epochs: HashMap::new(),
+            search_abort: None,
+            folder_abort: None,
+            message_abort: None,
             status_message: "Starting up...".into(),
+            phase: Phase::Loading,
+            folder_epoch: 0,
+            message_epoch: 0,
+            search_epoch: 0,
+            refresh_epoch: 0,
+            mutation_epoch: 0,
+            flag_epoch: 0,
+            refresh_in_flight: false,
+            refresh_pending: false,
+            refresh_accounts_outstanding: HashSet::new(),
+            stale_apply_drop_count: 0,
+            toc_drift_count: 0,
+            postcondition_failure_count: 0,
 
             search_active: false,
             search_query: String::new(),
@@ -427,9 +445,9 @@ impl cosmic::Application for AppModel {
             // Sync / connection / folder selection
             Message::AccountConnected { .. }
             | Message::CachedFoldersLoaded { .. }
-            | Message::CachedMessagesLoaded(_)
+            | Message::CachedMessagesLoaded { .. }
             | Message::SyncFoldersComplete { .. }
-            | Message::SyncMessagesComplete(_)
+            | Message::SyncMessagesComplete { .. }
             | Message::SelectFolder(_, _)
             | Message::LoadMoreMessages
             | Message::ForceReconnect(_)
@@ -454,7 +472,8 @@ impl cosmic::Application for AppModel {
             | Message::FolderDragEnter(_)
             | Message::FolderDragLeave
             | Message::FlagOpComplete { .. }
-            | Message::MoveOpComplete { .. } => self.handle_actions(message),
+            | Message::MoveOpComplete { .. }
+            | Message::MovePostconditionChecked { .. } => self.handle_actions(message),
 
             // Keyboard navigation
             Message::SelectionUp
@@ -466,7 +485,7 @@ impl cosmic::Application for AppModel {
             Message::SearchActivate
             | Message::SearchQueryChanged(_)
             | Message::SearchExecute
-            | Message::SearchResultsLoaded(_)
+            | Message::SearchResultsLoaded { .. }
             | Message::SearchClear => self.handle_search(message),
 
             // IMAP watch events

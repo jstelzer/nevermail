@@ -2,6 +2,31 @@ use cosmic::app::Task;
 
 use super::{AppModel, Message};
 
+fn revalidated_selection(
+    old: Option<usize>,
+    messages_len: usize,
+    visible_indices: &[usize],
+) -> Option<usize> {
+    let mut next = old.filter(|idx| *idx < messages_len);
+
+    if let Some(sel) = next {
+        if !visible_indices.contains(&sel) {
+            next = visible_indices
+                .iter()
+                .copied()
+                .rev()
+                .find(|i| *i < sel)
+                .or_else(|| visible_indices.first().copied());
+        }
+    }
+
+    if messages_len == 0 {
+        None
+    } else {
+        next
+    }
+}
+
 impl AppModel {
     pub(super) fn handle_navigation(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -101,5 +126,43 @@ impl AppModel {
             }
             self.visible_indices.push(i);
         }
+
+        self.revalidate_selection();
+    }
+
+    /// Keep selection valid against current canonical TOC projection.
+    fn revalidate_selection(&mut self) {
+        let old = self.selected_message;
+        let next = revalidated_selection(old, self.messages.len(), &self.visible_indices);
+
+        if next != old {
+            self.selected_message = next;
+            self.pending_body = None;
+            self.preview_body.clear();
+            self.preview_markdown.clear();
+            self.preview_attachments.clear();
+            self.preview_image_handles.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::revalidated_selection;
+
+    #[test]
+    fn selection_is_cleared_when_out_of_range() {
+        assert_eq!(revalidated_selection(Some(5), 3, &[0, 1, 2]), None);
+    }
+
+    #[test]
+    fn selection_moves_to_nearest_visible_when_hidden() {
+        assert_eq!(revalidated_selection(Some(3), 5, &[0, 1, 4]), Some(1));
+        assert_eq!(revalidated_selection(Some(0), 5, &[2, 3, 4]), Some(2));
+    }
+
+    #[test]
+    fn selection_clears_when_list_empty() {
+        assert_eq!(revalidated_selection(Some(0), 0, &[]), None);
     }
 }

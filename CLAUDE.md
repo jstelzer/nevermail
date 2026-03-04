@@ -119,6 +119,53 @@ Flag toggles and message moves apply immediately in the UI, then confirm with th
 - **Moves:** `remove_message_optimistic()` returns the removed `MessageSummary`; callers stash it in `pending_move_restore` keyed by envelope hash. `MoveOpComplete(Err)` re-inserts at the original index and repairs selection. Success clears the snapshot.
 - **Selection:** `remove_message_optimistic` decrements selection when the removed row was above, clamps when it was the selected row, and clears the preview pane only when needed.
 
+### Lane Epochs (Stale Apply Protection)
+Async completions carry lane epochs so stale results are dropped instead of mutating current state:
+- **Folder lane:** `CachedMessagesLoaded { account_id, mailbox_hash, offset, epoch, ... }`
+- **Message lane:** `SyncMessagesComplete { account_id, mailbox_hash, epoch, ... }`
+- **Search lane:** `SearchResultsLoaded { query, epoch, ... }`
+- **Flag lane:** per-envelope latest epoch tracked in `pending_flag_epochs`
+- **Mutation lane:** per-envelope latest epoch tracked in `pending_move_epochs`
+
+When epoch/context mismatch is detected, the apply is ignored and `stale_apply_drop_count` increments.
+
+Lane operations also use explicit abort handles for supersession:
+- `search_abort` cancels prior in-flight search task when a newer search starts
+- `folder_abort` cancels superseded cache TOC loads
+- `message_abort` cancels superseded IMAP message fetches
+
+This means newer intents both cancel prior work and still keep stale-apply guards as a safety net.
+
+### Refresh Lane Coalescing
+`Refresh` requests are now coalesced:
+- if a refresh is already running, new `Refresh` intents set `refresh_pending = true` and do not start overlapping work
+- when the current refresh finishes (`refresh_accounts_outstanding` drains), one queued refresh starts if pending
+- this enforces at-most-one active refresh operation while still honoring the latest intent
+
+### Move Postcondition Reconcile
+After `MoveOpComplete(Ok)`, the app verifies the source mailbox no longer contains the moved envelope by refetching source TOC from IMAP:
+- success (`true`) => no-op
+- failure (`false`) => increment `postcondition_failure_count` + `toc_drift_count`, emit retryable status, trigger `Refresh`
+- check error => emit retryable status and trigger `Refresh`
+
+This keeps canonical TOC convergence explicit when server-side MOVE behavior drifts.
+
+### Selection Revalidation
+`recompute_visible()` now always calls centralized selection revalidation:
+- selected index must exist in canonical TOC
+- selected row must remain visible in current thread-collapse projection
+- when invalid, selection is clamped/cleared and preview state is reset
+
+### Domain Phase
+App state now tracks domain phase explicitly via `Phase`:
+- `Idle`
+- `Loading`
+- `Refreshing`
+- `Searching`
+- `Error`
+
+Handlers update phase during mailbox loads, refresh, search, and failure paths so snapshot consumers can render from state instead of inferring from ad hoc flags.
+
 ### MIME Body Extraction
 Walks the attachment tree recursively looking for text/plain and text/html parts. Uses `Attachment::decode(Default::default())` for content-transfer-encoding. Prefers text/plain; falls back to html2text on text/html.
 

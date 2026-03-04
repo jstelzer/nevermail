@@ -2,7 +2,21 @@ use cosmic::app::Task;
 use neverlight_mail_core::{EnvelopeHash, FlagOp, Flag, MailboxHash};
 use neverlight_mail_core::store;
 
-use super::{AppModel, Message};
+use super::{AppModel, Message, Phase};
+
+fn move_postcondition_retry_message(result: &Result<bool, String>) -> Option<String> {
+    match result {
+        Ok(true) => None,
+        Ok(false) => Some(
+            "Move completed but source TOC still contains the message (retryable). Reconciling..."
+                .to_string(),
+        ),
+        Err(e) => Some(format!(
+            "Move postcondition check failed (retryable): {}",
+            e
+        )),
+    }
+}
 
 impl AppModel {
     pub(super) fn handle_actions(&mut self, message: Message) -> Task<Message> {
@@ -36,6 +50,7 @@ impl AppModel {
                     let pending_op = if new_read { "set_seen" } else { "unset_seen" }.to_string();
 
                     let mut tasks: Vec<Task<Message>> = Vec::new();
+                    let mut op_epoch: Option<u64> = None;
 
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
@@ -65,6 +80,10 @@ impl AppModel {
                     }
 
                     if let Some(session) = self.session_for_mailbox(mailbox_hash) {
+                        self.flag_epoch = self.flag_epoch.saturating_add(1);
+                        let epoch = self.flag_epoch;
+                        self.pending_flag_epochs.insert(envelope_hash, epoch);
+                        op_epoch = Some(epoch);
                         let flag_op = if new_read {
                             FlagOp::Set(Flag::SEEN)
                         } else {
@@ -80,12 +99,16 @@ impl AppModel {
                                 .await;
                             Message::FlagOpComplete {
                                 envelope_hash,
+                                epoch,
                                 prev_flags,
                                 result: result.map(|_| new_flags),
                             }
                         }));
                     }
 
+                    if op_epoch.is_none() {
+                        self.pending_flag_epochs.remove(&envelope_hash);
+                    }
                     if !tasks.is_empty() {
                         return cosmic::task::batch(tasks);
                     }
@@ -103,6 +126,7 @@ impl AppModel {
                     let pending_op = if new_starred { "set_flagged" } else { "unset_flagged" }.to_string();
 
                     let mut tasks: Vec<Task<Message>> = Vec::new();
+                    let mut op_epoch: Option<u64> = None;
 
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
@@ -132,6 +156,10 @@ impl AppModel {
                     }
 
                     if let Some(session) = self.session_for_mailbox(mailbox_hash) {
+                        self.flag_epoch = self.flag_epoch.saturating_add(1);
+                        let epoch = self.flag_epoch;
+                        self.pending_flag_epochs.insert(envelope_hash, epoch);
+                        op_epoch = Some(epoch);
                         let flag_op = if new_starred {
                             FlagOp::Set(Flag::FLAGGED)
                         } else {
@@ -147,12 +175,16 @@ impl AppModel {
                                 .await;
                             Message::FlagOpComplete {
                                 envelope_hash,
+                                epoch,
                                 prev_flags,
                                 result: result.map(|_| new_flags),
                             }
                         }));
                     }
 
+                    if op_epoch.is_none() {
+                        self.pending_flag_epochs.remove(&envelope_hash);
+                    }
                     if !tasks.is_empty() {
                         return cosmic::task::batch(tasks);
                     }
@@ -233,9 +265,15 @@ impl AppModel {
 
             Message::FlagOpComplete {
                 envelope_hash,
+                epoch,
                 prev_flags,
                 result,
             } => {
+                if self.pending_flag_epochs.get(&envelope_hash).copied() != Some(epoch) {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                self.pending_flag_epochs.remove(&envelope_hash);
                 match result {
                     Ok(new_flags) => {
                         if let Some(cache) = &self.cache {
@@ -270,6 +308,7 @@ impl AppModel {
                     Err(e) => {
                         log::error!("Flag operation failed: {}", e);
                         self.status_message = format!("Flag update failed: {}", e);
+                        self.phase = Phase::Error;
 
                         // Revert optimistic UI to exact pre-op flags.
                         if let Some(msg) = self.messages.iter_mut().find(|m| m.envelope_hash == envelope_hash) {
@@ -311,8 +350,15 @@ impl AppModel {
 
             Message::MoveOpComplete {
                 envelope_hash,
+                source_mailbox,
+                epoch,
                 result,
             } => {
+                if self.pending_move_epochs.get(&envelope_hash).copied() != Some(epoch) {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                self.pending_move_epochs.remove(&envelope_hash);
                 match result {
                     Ok(()) => {
                         let Some(account_id) = self
@@ -332,16 +378,62 @@ impl AppModel {
                             return Task::none();
                         };
                         self.pending_move_restore.remove(&envelope_hash);
+                        let mut tasks: Vec<Task<Message>> = Vec::new();
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
-                            return cosmic::task::future(async move {
-                                if let Err(e) =
-                                    cache.remove_message(account_id, envelope_hash).await
+                            let account_id_for_cache = account_id.clone();
+                            tasks.push(cosmic::task::future(async move {
+                                if let Err(e) = cache
+                                    .remove_message(account_id_for_cache, envelope_hash)
+                                    .await
                                 {
                                     log::warn!("Failed to remove message from cache: {}", e);
                                 }
                                 Message::Noop
-                            });
+                            }));
+                        }
+                        if let Some(session) = self.session_for_mailbox(source_mailbox) {
+                            let cache = self.cache.clone();
+                            let account_id_for_check = account_id;
+                            tasks.push(cosmic::task::future(async move {
+                                let result = session
+                                    .fetch_messages(MailboxHash(source_mailbox))
+                                    .await
+                                    .and_then(|messages| {
+                                        let contains = messages
+                                            .iter()
+                                            .any(|m| m.envelope_hash == envelope_hash);
+                                        if let Some(cache) = cache {
+                                            let account_id_for_save = account_id_for_check.clone();
+                                            let messages_for_save = messages.clone();
+                                            tokio::spawn(async move {
+                                                if let Err(e) = cache
+                                                    .save_messages(
+                                                        account_id_for_save,
+                                                        source_mailbox,
+                                                        messages_for_save,
+                                                    )
+                                                    .await
+                                                {
+                                                    log::warn!(
+                                                        "Failed to cache reconciled source mailbox: {}",
+                                                        e
+                                                    );
+                                                }
+                                            });
+                                        }
+                                        Ok(!contains)
+                                    });
+                                Message::MovePostconditionChecked {
+                                    envelope_hash,
+                                    source_mailbox,
+                                    epoch,
+                                    result,
+                                }
+                            }));
+                        }
+                        if !tasks.is_empty() {
+                            return cosmic::task::batch(tasks);
                         }
                     }
                     Err(e) => {
@@ -355,7 +447,37 @@ impl AppModel {
                         }
                         log::error!("Move operation failed: {}", e);
                         self.status_message = format!("Move failed: {}", e);
+                        self.phase = Phase::Error;
                     }
+                }
+            }
+            Message::MovePostconditionChecked {
+                envelope_hash,
+                source_mailbox: _source_mailbox,
+                epoch,
+                result,
+            } => {
+                // Only apply if this completion corresponds to latest move epoch for this envelope.
+                // If map entry is gone, the move already finalized; still allow same-epoch completion.
+                if self
+                    .pending_move_epochs
+                    .get(&envelope_hash)
+                    .is_some_and(|latest| *latest != epoch)
+                {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                if let Some(message) = move_postcondition_retry_message(&result) {
+                    self.postcondition_failure_count =
+                        self.postcondition_failure_count.saturating_add(1);
+                    if matches!(result, Ok(false)) {
+                        self.toc_drift_count = self.toc_drift_count.saturating_add(1);
+                    }
+                    self.status_message = message;
+                    if let Err(e) = result {
+                        log::warn!("Move postcondition check failed: {}", e);
+                    }
+                    return self.dispatch(Message::Refresh);
                 }
             }
 
@@ -434,6 +556,9 @@ impl AppModel {
         }
 
         if let Some(session) = self.session_for_mailbox(source_mailbox) {
+            self.mutation_epoch = self.mutation_epoch.saturating_add(1);
+            let epoch = self.mutation_epoch;
+            self.pending_move_epochs.insert(envelope_hash, epoch);
             tasks.push(cosmic::task::future(async move {
                 let result = session
                     .move_messages(
@@ -444,6 +569,8 @@ impl AppModel {
                     .await;
                 Message::MoveOpComplete {
                     envelope_hash,
+                    source_mailbox,
+                    epoch,
                     result,
                 }
             }));
@@ -454,5 +581,29 @@ impl AppModel {
         } else {
             cosmic::task::batch(tasks)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_postcondition_retry_message;
+
+    #[test]
+    fn move_postcondition_ok_true_is_noop() {
+        assert_eq!(move_postcondition_retry_message(&Ok(true)), None);
+    }
+
+    #[test]
+    fn move_postcondition_ok_false_requires_retryable_reconcile() {
+        let msg = move_postcondition_retry_message(&Ok(false)).expect("message");
+        assert!(msg.contains("retryable"));
+        assert!(msg.contains("Reconciling"));
+    }
+
+    #[test]
+    fn move_postcondition_err_requires_retryable_reconcile() {
+        let msg = move_postcondition_retry_message(&Err("imap timeout".to_string())).expect("message");
+        assert!(msg.contains("retryable"));
+        assert!(msg.contains("imap timeout"));
     }
 }

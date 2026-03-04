@@ -1,9 +1,38 @@
 use cosmic::app::Task;
+use futures::future::{AbortHandle, Abortable};
 use neverlight_mail_core::MailboxHash;
 use neverlight_mail_core::imap::ImapSession;
 use neverlight_mail_core::store::DEFAULT_PAGE_SIZE;
 
-use super::{AppModel, ConnectionState, Message};
+use super::{AppModel, ConnectionState, Message, Phase};
+
+fn should_apply_cached_messages(
+    current_epoch: u64,
+    incoming_epoch: u64,
+    active_account_id: Option<&str>,
+    incoming_account_id: &str,
+    active_mailbox_hash: Option<u64>,
+    incoming_mailbox_hash: u64,
+    current_offset: u32,
+    incoming_offset: u32,
+) -> bool {
+    current_epoch == incoming_epoch
+        && active_account_id == Some(incoming_account_id)
+        && active_mailbox_hash == Some(incoming_mailbox_hash)
+        && current_offset == incoming_offset
+}
+
+fn should_queue_refresh(refresh_in_flight: bool) -> bool {
+    refresh_in_flight
+}
+
+fn mark_refresh_account_complete(
+    outstanding: &mut std::collections::HashSet<String>,
+    account_id: &str,
+) -> bool {
+    outstanding.remove(account_id);
+    outstanding.is_empty()
+}
 
 impl AppModel {
     pub(super) fn handle_sync(&mut self, message: Message) -> Task<Message> {
@@ -23,13 +52,35 @@ impl AppModel {
                                 if let Some(cache) = &self.cache {
                                     let cache = cache.clone();
                                     let aid = account_id.clone();
+                                    self.folder_epoch = self.folder_epoch.saturating_add(1);
+                                    let epoch = self.folder_epoch;
                                     self.messages_offset = 0;
+                                    if let Some(handle) = self.folder_abort.take() {
+                                        handle.abort();
+                                    }
+                                    let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                                    self.folder_abort = Some(abort_handle);
                                     return cosmic::task::future(async move {
-                                        Message::CachedMessagesLoaded(
-                                            cache
-                                                .load_messages(aid, mailbox_hash, DEFAULT_PAGE_SIZE, 0)
-                                                .await,
+                                        match Abortable::new(
+                                            cache.load_messages(
+                                                aid.clone(),
+                                                mailbox_hash,
+                                                DEFAULT_PAGE_SIZE,
+                                                0,
+                                            ),
+                                            abort_reg,
                                         )
+                                        .await
+                                        {
+                                            Ok(result) => Message::CachedMessagesLoaded {
+                                                account_id: aid,
+                                                mailbox_hash,
+                                                offset: 0,
+                                                epoch,
+                                                result,
+                                            },
+                                            Err(_) => Message::Noop,
+                                        }
                                     });
                                 }
                             }
@@ -46,9 +97,40 @@ impl AppModel {
                 log::warn!("Failed to load cached folders: {}", e);
             }
 
-            Message::CachedMessagesLoaded(Ok(messages)) => {
+            Message::CachedMessagesLoaded {
+                account_id,
+                mailbox_hash,
+                offset,
+                epoch,
+                result: Ok(messages),
+            } => {
+                let active_account_id = self
+                    .active_account
+                    .and_then(|i| self.accounts.get(i))
+                    .map(|a| a.config.id.as_str());
+                let active_mailbox_hash = self.selected_folder.and_then(|fi| {
+                    self.active_account
+                        .and_then(|ai| self.accounts.get(ai))
+                        .and_then(|a| a.folders.get(fi))
+                        .map(|f| f.mailbox_hash)
+                });
+                if !should_apply_cached_messages(
+                    self.folder_epoch,
+                    epoch,
+                    active_account_id,
+                    account_id.as_str(),
+                    active_mailbox_hash,
+                    mailbox_hash,
+                    self.messages_offset,
+                    offset,
+                ) {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+
                 let count = messages.len();
                 self.has_more_messages = count as u32 == DEFAULT_PAGE_SIZE;
+                self.folder_abort = None;
 
                 // Remember selected message by envelope_hash so we can restore
                 // selection after the list is replaced (e.g. on refresh).
@@ -78,8 +160,14 @@ impl AppModel {
                     self.status_message =
                         format!("{} messages", self.messages.len());
                 }
+                self.phase = Phase::Idle;
             }
-            Message::CachedMessagesLoaded(Err(e)) => {
+            Message::CachedMessagesLoaded { epoch, result: Err(e), .. } => {
+                if epoch != self.folder_epoch {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                self.folder_abort = None;
                 log::warn!("Failed to load cached messages: {}", e);
             }
 
@@ -99,11 +187,14 @@ impl AppModel {
                             self.accounts[idx].folders.len()
                         );
                     }
+                    self.phase = Phase::Loading;
 
                     let cache = self.cache.clone();
                     let aid = account_id.clone();
                     let mut tasks: Vec<Task<Message>> = Vec::new();
 
+                    self.refresh_epoch = self.refresh_epoch.saturating_add(1);
+                    let epoch = self.refresh_epoch;
                     tasks.push(cosmic::task::future(async move {
                         let result = session.fetch_folders().await;
                         if let (Some(cache), Ok(ref folders)) = (&cache, &result) {
@@ -111,7 +202,11 @@ impl AppModel {
                                 log::warn!("Failed to cache folders: {}", e);
                             }
                         }
-                        Message::SyncFoldersComplete { account_id: aid, result }
+                        Message::SyncFoldersComplete {
+                            account_id: aid,
+                            epoch,
+                            result,
+                        }
                     }));
 
                     // Flush any body view that was deferred while disconnected
@@ -141,6 +236,7 @@ impl AppModel {
 
                     if !has_folders {
                         self.status_message = format!("{}: Connection failed: {}", label, e);
+                        self.phase = Phase::Error;
                     } else {
                         self.status_message = format!(
                             "{}: {} folders (offline — {})",
@@ -152,7 +248,26 @@ impl AppModel {
                 }
             }
 
-            Message::SyncFoldersComplete { account_id, result: Ok(folders) } => {
+            Message::SyncFoldersComplete {
+                account_id,
+                epoch,
+                result: Ok(folders),
+            } => {
+                if epoch != self.refresh_epoch {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                let mut refresh_completed = false;
+                if self.refresh_in_flight {
+                    if mark_refresh_account_complete(
+                        &mut self.refresh_accounts_outstanding,
+                        account_id.as_str(),
+                    ) {
+                        self.refresh_in_flight = false;
+                        self.phase = Phase::Idle;
+                        refresh_completed = true;
+                    }
+                }
                 if let Some(idx) = self.account_index(&account_id) {
                     self.accounts[idx].folders = folders;
                     self.accounts[idx].rebuild_folder_map();
@@ -187,27 +302,75 @@ impl AppModel {
                                     let cache = self.cache.clone();
                                     let mh = folder.mailbox_hash;
                                     let aid = account_id.clone();
-                                    return cosmic::task::future(async move {
-                                        let result = session.fetch_messages(mailbox_hash).await;
+                                    let aid_for_cache = aid.clone();
+                                    self.message_epoch = self.message_epoch.saturating_add(1);
+                                    let message_epoch = self.message_epoch;
+                                    if let Some(handle) = self.message_abort.take() {
+                                        handle.abort();
+                                    }
+                                    let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                                    self.message_abort = Some(abort_handle);
+                                    let fetch_task = cosmic::task::future(async move {
+                                        let result = match Abortable::new(
+                                            session.fetch_messages(mailbox_hash),
+                                            abort_reg,
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => result,
+                                            Err(_) => return Message::Noop,
+                                        };
                                         if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
                                             if let Err(e) =
-                                                cache.save_messages(aid, mh, msgs.clone()).await
+                                                cache.save_messages(aid_for_cache, mh, msgs.clone()).await
                                             {
                                                 log::warn!("Failed to cache messages: {}", e);
                                             }
                                         }
                                         match result {
-                                            Ok(_) => Message::SyncMessagesComplete(Ok(())),
-                                            Err(e) => Message::SyncMessagesComplete(Err(e)),
+                                            Ok(_) => Message::SyncMessagesComplete {
+                                                account_id: aid,
+                                                mailbox_hash: mh,
+                                                epoch: message_epoch,
+                                                result: Ok(()),
+                                            },
+                                            Err(e) => Message::SyncMessagesComplete {
+                                                account_id: aid,
+                                                mailbox_hash: mh,
+                                                epoch: message_epoch,
+                                                result: Err(e),
+                                            },
                                         }
                                     });
+                                    if refresh_completed && self.refresh_pending {
+                                        self.refresh_pending = false;
+                                        let refresh_task = self.dispatch(Message::Refresh);
+                                        return cosmic::task::batch(vec![fetch_task, refresh_task]);
+                                    }
+                                    return fetch_task;
                                 }
                             }
                         }
                     }
+                    if refresh_completed && self.refresh_pending {
+                        self.refresh_pending = false;
+                        return self.dispatch(Message::Refresh);
+                    }
+                }
+                if refresh_completed && self.refresh_pending {
+                    self.refresh_pending = false;
+                    return self.dispatch(Message::Refresh);
                 }
             }
-            Message::SyncFoldersComplete { account_id, result: Err(e) } => {
+            Message::SyncFoldersComplete {
+                account_id,
+                epoch,
+                result: Err(e),
+            } => {
+                if epoch != self.refresh_epoch {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
                 if let Some(idx) = self.account_index(&account_id) {
                     self.accounts[idx].conn_state = ConnectionState::Connected;
                     let label = &self.accounts[idx].config.label;
@@ -222,15 +385,55 @@ impl AppModel {
                         );
                     }
                     log::error!("Folder sync failed for '{}': {}", label, e);
+                    self.phase = Phase::Error;
+                    if self.refresh_in_flight {
+                        if mark_refresh_account_complete(
+                            &mut self.refresh_accounts_outstanding,
+                            account_id.as_str(),
+                        ) {
+                            self.refresh_in_flight = false;
+                            if self.refresh_pending {
+                                self.refresh_pending = false;
+                                return self.dispatch(Message::Refresh);
+                            }
+                        }
+                    }
                 }
             }
 
-            Message::SyncMessagesComplete(Ok(())) => {
+            Message::SyncMessagesComplete {
+                account_id,
+                mailbox_hash,
+                epoch,
+                result: Ok(()),
+            } => {
+                if epoch != self.message_epoch {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                if self
+                    .active_account
+                    .and_then(|i| self.accounts.get(i))
+                    .map(|a| a.config.id.as_str())
+                    != Some(account_id.as_str())
+                    || self.selected_folder
+                        .and_then(|fi| {
+                            self.active_account
+                                .and_then(|ai| self.accounts.get(ai))
+                                .and_then(|a| a.folders.get(fi))
+                                .map(|f| f.mailbox_hash)
+                        }) != Some(mailbox_hash)
+                {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
                 if let Some(idx) = self.active_account {
                     if let Some(acct) = self.accounts.get_mut(idx) {
                         acct.conn_state = ConnectionState::Connected;
                     }
                 }
+                self.phase = Phase::Idle;
+                self.message_abort = None;
                 let mut tasks: Vec<Task<Message>> = Vec::new();
 
                 if let Some(acct_idx) = self.active_account {
@@ -241,12 +444,34 @@ impl AppModel {
                                 let cache = cache.clone();
                                 let aid = self.active_account_id();
                                 self.messages_offset = 0;
+                                self.folder_epoch = self.folder_epoch.saturating_add(1);
+                                let folder_epoch = self.folder_epoch;
+                                if let Some(handle) = self.folder_abort.take() {
+                                    handle.abort();
+                                }
+                                let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                                self.folder_abort = Some(abort_handle);
                                 tasks.push(cosmic::task::future(async move {
-                                    Message::CachedMessagesLoaded(
-                                        cache
-                                            .load_messages(aid, mailbox_hash, DEFAULT_PAGE_SIZE, 0)
-                                            .await,
+                                    match Abortable::new(
+                                        cache.load_messages(
+                                            aid.clone(),
+                                            mailbox_hash,
+                                            DEFAULT_PAGE_SIZE,
+                                            0,
+                                        ),
+                                        abort_reg,
                                     )
+                                    .await
+                                    {
+                                        Ok(result) => Message::CachedMessagesLoaded {
+                                            account_id: aid,
+                                            mailbox_hash,
+                                            offset: 0,
+                                            epoch: folder_epoch,
+                                            result,
+                                        },
+                                        Err(_) => Message::Noop,
+                                    }
                                 }));
                             }
                         }
@@ -267,7 +492,12 @@ impl AppModel {
                     return cosmic::task::batch(tasks);
                 }
             }
-            Message::SyncMessagesComplete(Err(e)) => {
+            Message::SyncMessagesComplete { epoch, result: Err(e), .. } => {
+                if epoch != self.message_epoch {
+                    self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
+                    return Task::none();
+                }
+                self.message_abort = None;
                 if let Some(idx) = self.active_account {
                     if let Some(acct) = self.accounts.get_mut(idx) {
                         acct.conn_state = ConnectionState::Connected;
@@ -275,11 +505,22 @@ impl AppModel {
                 }
                 self.status_message = format!("Sync failed: {}", e);
                 log::error!("Message sync failed: {}", e);
+                self.phase = Phase::Error;
             }
 
             Message::SelectFolder(acct_idx, folder_idx) => {
                 self.active_account = Some(acct_idx);
                 self.selected_folder = Some(folder_idx);
+                if let Some(handle) = self.folder_abort.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = self.message_abort.take() {
+                    handle.abort();
+                }
+                self.folder_epoch = self.folder_epoch.saturating_add(1);
+                let folder_epoch = self.folder_epoch;
+                self.message_epoch = self.message_epoch.saturating_add(1);
+                let message_epoch = self.message_epoch;
                 self.messages.clear();
                 self.selected_message = None;
                 self.preview_body.clear();
@@ -290,6 +531,7 @@ impl AppModel {
                 self.has_more_messages = false;
                 self.collapsed_threads.clear();
                 self.recompute_visible();
+                self.phase = Phase::Loading;
 
                 if let Some(acct) = self.accounts.get(acct_idx) {
                     if let Some(folder) = acct.folders.get(folder_idx) {
@@ -301,10 +543,29 @@ impl AppModel {
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
                             let aid2 = aid.clone();
+                            let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                            self.folder_abort = Some(abort_handle);
                             tasks.push(cosmic::task::future(async move {
-                                Message::CachedMessagesLoaded(
-                                    cache.load_messages(aid2, mailbox_hash, DEFAULT_PAGE_SIZE, 0).await,
+                                match Abortable::new(
+                                    cache.load_messages(
+                                        aid2.clone(),
+                                        mailbox_hash,
+                                        DEFAULT_PAGE_SIZE,
+                                        0,
+                                    ),
+                                    abort_reg,
                                 )
+                                .await
+                                {
+                                    Ok(result) => Message::CachedMessagesLoaded {
+                                        account_id: aid2,
+                                        mailbox_hash,
+                                        offset: 0,
+                                        epoch: folder_epoch,
+                                        result,
+                                    },
+                                    Err(_) => Message::Noop,
+                                }
                             }));
                         }
 
@@ -312,23 +573,44 @@ impl AppModel {
                             let session = session.clone();
                             let cache = self.cache.clone();
                             let aid2 = aid.clone();
+                            let aid_for_cache = aid2.clone();
                             if let Some(acct_mut) = self.accounts.get_mut(acct_idx) {
                                 acct_mut.conn_state = ConnectionState::Syncing;
                             }
                             self.status_message = format!("Loading {}...", folder_name);
                             let mbox_hash = MailboxHash(mailbox_hash);
+                            let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                            self.message_abort = Some(abort_handle);
                             tasks.push(cosmic::task::future(async move {
-                                let result = session.fetch_messages(mbox_hash).await;
+                                let result = match Abortable::new(
+                                    session.fetch_messages(mbox_hash),
+                                    abort_reg,
+                                )
+                                .await
+                                {
+                                    Ok(result) => result,
+                                    Err(_) => return Message::Noop,
+                                };
                                 if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
                                     if let Err(e) =
-                                        cache.save_messages(aid2, mailbox_hash, msgs.clone()).await
+                                        cache.save_messages(aid_for_cache, mailbox_hash, msgs.clone()).await
                                     {
                                         log::warn!("Failed to cache messages: {}", e);
                                     }
                                 }
                                 match result {
-                                    Ok(_) => Message::SyncMessagesComplete(Ok(())),
-                                    Err(e) => Message::SyncMessagesComplete(Err(e)),
+                                    Ok(_) => Message::SyncMessagesComplete {
+                                        account_id: aid2,
+                                        mailbox_hash,
+                                        epoch: message_epoch,
+                                        result: Ok(()),
+                                    },
+                                    Err(e) => Message::SyncMessagesComplete {
+                                        account_id: aid2,
+                                        mailbox_hash,
+                                        epoch: message_epoch,
+                                        result: Err(e),
+                                    },
                                 }
                             }));
                         }
@@ -351,12 +633,34 @@ impl AppModel {
                             if let Some(cache) = &self.cache {
                                 let cache = cache.clone();
                                 let aid = self.active_account_id();
+                                let mailbox_hash_copy = mailbox_hash;
+                                let epoch = self.folder_epoch;
+                                if let Some(handle) = self.folder_abort.take() {
+                                    handle.abort();
+                                }
+                                let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                                self.folder_abort = Some(abort_handle);
                                 return cosmic::task::future(async move {
-                                    Message::CachedMessagesLoaded(
-                                        cache
-                                            .load_messages(aid, mailbox_hash, DEFAULT_PAGE_SIZE, offset)
-                                            .await,
+                                    match Abortable::new(
+                                        cache.load_messages(
+                                            aid.clone(),
+                                            mailbox_hash,
+                                            DEFAULT_PAGE_SIZE,
+                                            offset,
+                                        ),
+                                        abort_reg,
                                     )
+                                    .await
+                                    {
+                                        Ok(result) => Message::CachedMessagesLoaded {
+                                            account_id: aid,
+                                            mailbox_hash: mailbox_hash_copy,
+                                            offset,
+                                            epoch,
+                                            result,
+                                        },
+                                        Err(_) => Message::Noop,
+                                    }
                                 });
                             }
                         }
@@ -365,12 +669,21 @@ impl AppModel {
             }
 
             Message::Refresh => {
+                if should_queue_refresh(self.refresh_in_flight) {
+                    self.refresh_pending = true;
+                    self.status_message = "Refresh queued...".into();
+                    return Task::none();
+                }
+                self.refresh_epoch = self.refresh_epoch.saturating_add(1);
+                let refresh_epoch = self.refresh_epoch;
                 let mut tasks: Vec<Task<Message>> = Vec::new();
+                self.refresh_accounts_outstanding.clear();
                 for acct in &self.accounts {
                     if let Some(session) = &acct.session {
                         let session = session.clone();
                         let cache = self.cache.clone();
                         let aid = acct.config.id.clone();
+                        self.refresh_accounts_outstanding.insert(aid.clone());
                         tasks.push(cosmic::task::future(async move {
                             let result = session.fetch_folders().await;
                             if let (Some(cache), Ok(ref folders)) = (&cache, &result) {
@@ -378,14 +691,21 @@ impl AppModel {
                                     log::warn!("Failed to cache folders: {}", e);
                                 }
                             }
-                            Message::SyncFoldersComplete { account_id: aid, result }
+                            Message::SyncFoldersComplete {
+                                account_id: aid,
+                                epoch: refresh_epoch,
+                                result,
+                            }
                         }));
                     }
                 }
                 if !tasks.is_empty() {
+                    self.refresh_in_flight = true;
+                    self.phase = Phase::Refreshing;
                     self.status_message = "Refreshing...".into();
                     return cosmic::task::batch(tasks);
                 }
+                self.phase = Phase::Idle;
             }
 
             Message::ForceReconnect(ref account_id) => {
@@ -409,5 +729,91 @@ impl AppModel {
             _ => {}
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        mark_refresh_account_complete, should_apply_cached_messages, should_queue_refresh,
+    };
+    use std::collections::HashSet;
+
+    #[test]
+    fn cached_messages_apply_when_epoch_and_context_match() {
+        assert!(should_apply_cached_messages(
+            3,
+            3,
+            Some("acct-1"),
+            "acct-1",
+            Some(42),
+            42,
+            0,
+            0
+        ));
+    }
+
+    #[test]
+    fn cached_messages_drop_on_epoch_mismatch() {
+        assert!(!should_apply_cached_messages(
+            3,
+            2,
+            Some("acct-1"),
+            "acct-1",
+            Some(42),
+            42,
+            0,
+            0
+        ));
+    }
+
+    #[test]
+    fn cached_messages_drop_on_account_or_mailbox_or_offset_mismatch() {
+        assert!(!should_apply_cached_messages(
+            3,
+            3,
+            Some("acct-2"),
+            "acct-1",
+            Some(42),
+            42,
+            0,
+            0
+        ));
+        assert!(!should_apply_cached_messages(
+            3,
+            3,
+            Some("acct-1"),
+            "acct-1",
+            Some(7),
+            42,
+            0,
+            0
+        ));
+        assert!(!should_apply_cached_messages(
+            3,
+            3,
+            Some("acct-1"),
+            "acct-1",
+            Some(42),
+            42,
+            50,
+            0
+        ));
+    }
+
+    #[test]
+    fn refresh_is_queued_when_in_flight() {
+        assert!(should_queue_refresh(true));
+        assert!(!should_queue_refresh(false));
+    }
+
+    #[test]
+    fn refresh_completion_drains_outstanding_accounts() {
+        let mut outstanding: HashSet<String> =
+            ["acct-a".to_string(), "acct-b".to_string()].into_iter().collect();
+        assert!(!mark_refresh_account_complete(&mut outstanding, "acct-a"));
+        assert_eq!(outstanding.len(), 1);
+        assert!(mark_refresh_account_complete(&mut outstanding, "acct-b"));
+        assert!(outstanding.is_empty());
     }
 }
