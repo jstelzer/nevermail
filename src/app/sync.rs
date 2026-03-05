@@ -193,6 +193,12 @@ impl AppModel {
                 if let Some(idx) = self.account_index(&account_id) {
                     self.accounts[idx].session = Some(session.clone());
                     self.accounts[idx].conn_state = ConnectionState::Syncing;
+                    if self.accounts[idx].reconnect_attempts > 0 {
+                        self.reconnect_count = self.reconnect_count.saturating_add(1);
+                    }
+                    self.accounts[idx].reconnect_attempts = 0;
+                    self.accounts[idx].last_error = None;
+                    self.notified_envelopes.clear();
                     self.clear_error_surface();
 
                     let had_cached_folders = !self.accounts[idx].folders.is_empty();
@@ -239,7 +245,14 @@ impl AppModel {
             Message::AccountConnected { account_id, result: Err(e) } => {
                 if let Some(idx) = self.account_index(&account_id) {
                     self.accounts[idx].conn_state = ConnectionState::Error(e.clone());
-                    log::error!("IMAP connection failed for '{}': {}", self.accounts[idx].config.label, e);
+                    self.accounts[idx].last_error = Some(e.clone());
+                    self.accounts[idx].reconnect_attempts = self.accounts[idx].reconnect_attempts.saturating_add(1);
+                    log::error!(
+                        "IMAP connection failed for '{}' (attempt {}): {}",
+                        self.accounts[idx].config.label,
+                        self.accounts[idx].reconnect_attempts,
+                        e,
+                    );
 
                     let has_folders = !self.accounts[idx].folders.is_empty();
                     let label = &self.accounts[idx].config.label;
@@ -263,6 +276,19 @@ impl AppModel {
                             e
                         );
                     }
+
+                    // Schedule reconnect with exponential backoff
+                    let delay = self.accounts[idx].reconnect_backoff();
+                    let aid = account_id.clone();
+                    log::info!(
+                        "Scheduling reconnect for '{}' in {}s",
+                        self.accounts[idx].config.label,
+                        delay.as_secs(),
+                    );
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(delay).await;
+                        Message::ForceReconnect(aid)
+                    });
                 }
             }
 
@@ -293,6 +319,7 @@ impl AppModel {
                     self.accounts[idx].rebuild_folder_map();
                     self.accounts[idx].conn_state = ConnectionState::Connected;
                     self.clear_error_surface();
+                    self.last_refresh_at = Some(Instant::now());
                     self.status_message = format!(
                         "{}: {} folders",
                         self.accounts[idx].config.label,
@@ -399,8 +426,12 @@ impl AppModel {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
+                let mut tasks: Vec<Task<Message>> = Vec::new();
                 if let Some(idx) = self.account_index(&account_id) {
-                    self.accounts[idx].conn_state = ConnectionState::Connected;
+                    // Sync failure likely means the session is dead — invalidate it
+                    self.accounts[idx].conn_state = ConnectionState::Error(e.clone());
+                    self.accounts[idx].last_error = Some(e.clone());
+                    self.accounts[idx].session = None;
                     let label = &self.accounts[idx].config.label;
                     if self.accounts[idx].folders.is_empty() {
                         self.status_message = format!("{}: Failed to load folders: {}", label, e);
@@ -412,8 +443,17 @@ impl AppModel {
                             e
                         );
                     }
-                    log::error!("Folder sync failed for '{}': {}", label, e);
+                    log::error!("Folder sync failed for '{}': {} — dropping session", label, e);
                     self.set_status_error(self.status_message.clone());
+
+                    // Schedule reconnect with backoff
+                    let delay = self.accounts[idx].reconnect_backoff();
+                    let aid = account_id.clone();
+                    tasks.push(cosmic::task::future(async move {
+                        tokio::time::sleep(delay).await;
+                        Message::ForceReconnect(aid)
+                    }));
+
                     if self.refresh_in_flight
                         && mark_refresh_account_complete(
                             &mut self.refresh_accounts_outstanding,
@@ -425,9 +465,12 @@ impl AppModel {
                         self.refresh_timeout_reported = false;
                         if self.refresh_pending {
                             self.refresh_pending = false;
-                            return self.dispatch(Message::Refresh);
+                            tasks.push(self.dispatch(Message::Refresh));
                         }
                     }
+                }
+                if !tasks.is_empty() {
+                    return cosmic::task::batch(tasks);
                 }
             }
 
@@ -465,6 +508,7 @@ impl AppModel {
                 self.clear_error_surface();
                 self.phase = Phase::Idle;
                 self.message_abort = None;
+                self.last_sync_at = Some(Instant::now());
                 let mut tasks: Vec<Task<Message>> = Vec::new();
 
                 if let Some(acct_idx) = self.active_account {
@@ -523,16 +567,28 @@ impl AppModel {
                     return cosmic::task::batch(tasks);
                 }
             }
-            Message::SyncMessagesComplete { epoch, result: Err(e), .. } => {
+            Message::SyncMessagesComplete { ref account_id, epoch, result: Err(ref e), .. } => {
                 if epoch != self.message_epoch {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
                 self.message_abort = None;
-                if let Some(idx) = self.active_account {
-                    if let Some(acct) = self.accounts.get_mut(idx) {
-                        acct.conn_state = ConnectionState::Connected;
-                    }
+                if let Some(idx) = self.account_index(account_id) {
+                    let acct = &mut self.accounts[idx];
+                    acct.conn_state = ConnectionState::Error(e.clone());
+                    acct.last_error = Some(e.clone());
+                    acct.session = None;
+                    let label = &acct.config.label;
+                    log::error!("Message sync failed for '{}': {} — dropping session", label, e);
+
+                    let delay = acct.reconnect_backoff();
+                    let aid = account_id.clone();
+                    self.status_message = format!("Sync failed: {}", e);
+                    self.set_status_error(self.status_message.clone());
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(delay).await;
+                        Message::ForceReconnect(aid)
+                    });
                 }
                 self.status_message = format!("Sync failed: {}", e);
                 log::error!("Message sync failed: {}", e);
@@ -708,17 +764,22 @@ impl AppModel {
             Message::Refresh => {
                 if should_queue_refresh(self.refresh_in_flight) {
                     if refresh_has_timed_out(self.refresh_started_at, self.refresh_timeout_reported) {
+                        // Force-clear the stuck refresh so a new one can start
                         self.refresh_timeout_reported = true;
                         self.refresh_timeout_count = self.refresh_timeout_count.saturating_add(1);
                         self.refresh_stuck_count = self.refresh_stuck_count.saturating_add(1);
-                        self.set_status_error(
-                            "Refresh appears stuck (timeout); keeping latest request queued."
-                                .into(),
-                        );
+                        self.refresh_in_flight = false;
+                        self.refresh_started_at = None;
+                        self.refresh_accounts_outstanding.clear();
+                        // Bump epoch so stale completions from the hung refresh are dropped
+                        self.refresh_epoch = self.refresh_epoch.saturating_add(1);
+                        log::warn!("Refresh stuck ({}s timeout), force-clearing and restarting", REFRESH_STUCK_TIMEOUT.as_secs());
+                        // Fall through to start a new refresh below
+                    } else {
+                        self.refresh_pending = true;
+                        self.status_message = "Refresh queued...".into();
+                        return Task::none();
                     }
-                    self.refresh_pending = true;
-                    self.status_message = "Refresh queued...".into();
-                    return Task::none();
                 }
                 self.refresh_epoch = self.refresh_epoch.saturating_add(1);
                 let refresh_epoch = self.refresh_epoch;

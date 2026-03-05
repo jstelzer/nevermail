@@ -29,6 +29,7 @@ pub(super) fn imap_watch_stream(
                                     let _ = output
                                         .send(ImapWatchEvent::NewMessage {
                                             mailbox_hash: rev.mailbox_hash.0,
+                                            envelope_hash: envelope.hash().0,
                                             subject: envelope.subject().to_string(),
                                             from,
                                         })
@@ -89,9 +90,16 @@ impl AppModel {
         match message {
             Message::ImapEvent(ref _account_id, ImapWatchEvent::NewMessage {
                 mailbox_hash,
+                envelope_hash,
                 subject,
                 from,
             }) => {
+                // Dedup: melib can emit multiple Create events for the same envelope
+                if !self.notified_envelopes.insert(envelope_hash) {
+                    log::debug!("Skipping duplicate notification for envelope {}", envelope_hash);
+                    return Task::none();
+                }
+
                 let notif_task = cosmic::task::future(async move {
                     let subj = subject;
                     let f = from;
@@ -245,6 +253,7 @@ impl AppModel {
                 log::warn!("IMAP watch error for account: {}", e);
                 if let Some(idx) = self.account_index(account_id) {
                     self.accounts[idx].conn_state = ConnectionState::Error(e.clone());
+                    self.accounts[idx].last_error = Some(e.clone());
                     self.accounts[idx].session = None;
                     let aid = account_id.clone();
                     return cosmic::task::future(async move {
@@ -257,6 +266,7 @@ impl AppModel {
                 log::info!("IMAP watch stream ended for account");
                 if let Some(idx) = self.account_index(account_id) {
                     self.accounts[idx].conn_state = ConnectionState::Error("Connection lost".into());
+                    self.accounts[idx].last_error = Some("Connection lost".into());
                     self.accounts[idx].session = None;
                     let aid = account_id.clone();
                     return cosmic::task::future(async move {

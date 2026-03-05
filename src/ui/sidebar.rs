@@ -14,7 +14,12 @@ pub struct DiagnosticsState<'a> {
     pub postcondition_failure_count: u64,
     pub refresh_timeout_count: u64,
     pub refresh_stuck_count: u64,
+    pub reconnect_count: u64,
     pub error_surface: Option<&'a ErrorSurface>,
+    pub accounts: &'a [AccountState],
+    pub last_sync_at: Option<std::time::Instant>,
+    pub last_refresh_at: Option<std::time::Instant>,
+    pub refresh_in_flight: bool,
 }
 
 /// Render the folder sidebar with multi-account sections.
@@ -215,22 +220,38 @@ fn status_pill_view<'a>(
         ConnectionState::Disconnected => format!("○ {}  Disconnected", acct.config.label),
     };
 
-    let clickable = matches!(
-        acct.conn_state,
-        ConnectionState::Connected | ConnectionState::Error(_) | ConnectionState::Disconnected
-    );
-
     let pill = widget::container(widget::text::caption(label)).padding([6, 8]);
 
-    if clickable {
-        let aid = acct.config.id.clone();
+    let action = match &acct.conn_state {
+        ConnectionState::Connected => Some(Message::Refresh),
+        ConnectionState::Error(_) | ConnectionState::Disconnected => {
+            Some(Message::ForceReconnect(acct.config.id.clone()))
+        }
+        _ => None,
+    };
+
+    if let Some(msg) = action {
         widget::button::custom(pill)
-            .on_press(Message::ForceReconnect(aid))
+            .on_press(msg)
             .class(cosmic::theme::Button::Text)
             .width(Length::Fill)
             .into()
     } else {
         pill.width(Length::Fill).into()
+    }
+}
+
+fn ago_label(instant: Option<std::time::Instant>) -> String {
+    match instant {
+        Some(t) => {
+            let secs = t.elapsed().as_secs();
+            if secs < 60 {
+                format!("{}s ago", secs)
+            } else {
+                format!("{}m ago", secs / 60)
+            }
+        }
+        None => "never".into(),
     }
 }
 
@@ -263,21 +284,64 @@ fn diagnostics_view<'a>(state: DiagnosticsState<'a>) -> Element<'a, Message> {
 
     let mut col = widget::column()
         .spacing(2)
-        .push(header)
-        .push(widget::text::caption(format!("Phase: {}", phase_label)))
-        .push(widget::text::caption(format!(
+        .push(header);
+
+    // -- Connection state per account --
+    for acct in state.accounts {
+        let conn_label = match &acct.conn_state {
+            ConnectionState::Connected => "connected".into(),
+            ConnectionState::Connecting => "connecting...".into(),
+            ConnectionState::Syncing => "syncing...".into(),
+            ConnectionState::Disconnected => "disconnected".into(),
+            ConnectionState::Error(e) => format!("error: {}", truncate(e, 30)),
+        };
+        let mut line = format!("{}: {}", acct.config.label, conn_label);
+        if acct.reconnect_attempts > 0 {
+            line.push_str(&format!(" (retry #{})", acct.reconnect_attempts));
+        }
+        col = col.push(widget::text::caption(line));
+    }
+
+    // -- Timing --
+    let refresh_status = if state.refresh_in_flight {
+        "in progress".into()
+    } else {
+        ago_label(state.last_refresh_at)
+    };
+    col = col.push(widget::text::caption(format!("Last refresh: {}", refresh_status)));
+    col = col.push(widget::text::caption(format!("Last sync: {}", ago_label(state.last_sync_at))));
+
+    // -- Phase and counters --
+    col = col.push(widget::text::caption(format!("Phase: {}", phase_label)));
+
+    // Only show non-zero counters to reduce noise
+    if state.stale_apply_drop_count > 0 {
+        col = col.push(widget::text::caption(format!(
             "Stale drops: {}",
             state.stale_apply_drop_count
-        )))
-        .push(widget::text::caption(format!("TOC drift: {}", state.toc_drift_count)))
-        .push(widget::text::caption(format!(
+        )));
+    }
+    if state.toc_drift_count > 0 {
+        col = col.push(widget::text::caption(format!("TOC drift: {}", state.toc_drift_count)));
+    }
+    if state.postcondition_failure_count > 0 {
+        col = col.push(widget::text::caption(format!(
             "Postcondition fails: {}",
             state.postcondition_failure_count
-        )))
-        .push(widget::text::caption(format!(
+        )));
+    }
+    if state.refresh_stuck_count > 0 || state.refresh_timeout_count > 0 {
+        col = col.push(widget::text::caption(format!(
             "Refresh stuck/timeouts: {}/{}",
             state.refresh_stuck_count, state.refresh_timeout_count
         )));
+    }
+    if state.reconnect_count > 0 {
+        col = col.push(widget::text::caption(format!(
+            "Reconnects: {}",
+            state.reconnect_count
+        )));
+    }
 
     if state.selected_folder_evicted {
         col = col.push(widget::text::caption("Folder selection evicted"));

@@ -116,11 +116,15 @@ impl cosmic::Application for AppModel {
             flag_in_flight: false,
             pending_move_intent: None,
             pending_flag_intent: None,
+            notified_envelopes: HashSet::new(),
             stale_apply_drop_count: 0,
             toc_drift_count: 0,
             postcondition_failure_count: 0,
             refresh_timeout_count: 0,
             refresh_stuck_count: 0,
+            reconnect_count: 0,
+            last_sync_at: None,
+            last_refresh_at: None,
 
             search_active: false,
             search_query: String::new(),
@@ -299,6 +303,9 @@ impl cosmic::Application for AppModel {
                         keyboard::Key::Named(keyboard::key::Named::Escape) => {
                             Some(Message::SearchClear)
                         }
+                        keyboard::Key::Named(keyboard::key::Named::F5) => {
+                            Some(Message::Refresh)
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -357,7 +364,12 @@ impl cosmic::Application for AppModel {
                         postcondition_failure_count: self.postcondition_failure_count,
                         refresh_timeout_count: self.refresh_timeout_count,
                         refresh_stuck_count: self.refresh_stuck_count,
+                        reconnect_count: self.reconnect_count,
                         error_surface: self.error_surface.as_ref(),
+                        accounts: &self.accounts,
+                        last_sync_at: self.last_sync_at,
+                        last_refresh_at: self.last_refresh_at,
+                        refresh_in_flight: self.refresh_in_flight,
                     },
                 ),
                 PaneKind::MessageList => crate::ui::message_list::view(

@@ -99,6 +99,10 @@ pub struct AccountState {
     pub folders: Vec<Folder>,
     pub folder_map: HashMap<String, u64>,
     pub collapsed: bool,
+    /// Consecutive reconnect failures (reset on success).
+    pub reconnect_attempts: u32,
+    /// Last error message for diagnostics display.
+    pub last_error: Option<String>,
 }
 
 impl AccountState {
@@ -110,7 +114,20 @@ impl AccountState {
             folders: Vec::new(),
             folder_map: HashMap::new(),
             collapsed: false,
+            reconnect_attempts: 0,
+            last_error: None,
         }
+    }
+
+    /// Backoff duration for reconnect retries: 5s, 15s, 30s, 60s cap.
+    pub fn reconnect_backoff(&self) -> std::time::Duration {
+        let secs = match self.reconnect_attempts {
+            0 => 5,
+            1 => 15,
+            2 => 30,
+            _ => 60,
+        };
+        std::time::Duration::from_secs(secs)
     }
 
     pub fn rebuild_folder_map(&mut self) {
@@ -187,12 +204,18 @@ pub struct AppModel {
     pub(super) flag_in_flight: bool,
     pub(super) pending_move_intent: Option<PendingMoveIntent>,
     pub(super) pending_flag_intent: Option<PendingFlagIntent>,
+    /// Recently notified envelope hashes (dedup watch Create events).
+    pub(super) notified_envelopes: HashSet<u64>,
     /// Diagnostics counters.
     pub(super) stale_apply_drop_count: u64,
     pub(super) toc_drift_count: u64,
     pub(super) postcondition_failure_count: u64,
     pub(super) refresh_timeout_count: u64,
     pub(super) refresh_stuck_count: u64,
+    pub(super) reconnect_count: u64,
+    /// Timing for diagnostics.
+    pub(super) last_sync_at: Option<Instant>,
+    pub(super) last_refresh_at: Option<Instant>,
 
     // Search state
     pub(super) search_active: bool,
@@ -401,6 +424,7 @@ pub enum Message {
 pub enum ImapWatchEvent {
     NewMessage {
         mailbox_hash: u64,
+        envelope_hash: u64,
         subject: String,
         from: String,
     },

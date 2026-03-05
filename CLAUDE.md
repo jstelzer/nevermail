@@ -1,6 +1,6 @@
 # Claude Context: Neverlight Mail (cosmic-email)
 
-**Last Updated:** 2026-02-25
+**Last Updated:** 2026-03-05
 
 ## What This Is
 
@@ -140,6 +140,7 @@ This means newer intents both cancel prior work and still keep stale-apply guard
 `Refresh` requests are now coalesced:
 - if a refresh is already running, new `Refresh` intents set `refresh_pending = true` and do not start overlapping work
 - when the current refresh finishes (`refresh_accounts_outstanding` drains), one queued refresh starts if pending
+- if a refresh appears stuck (45s timeout), `refresh_in_flight` is force-cleared, epoch bumped, and a new refresh starts immediately
 - this enforces at-most-one active refresh operation while still honoring the latest intent
 
 ### Move Postcondition Reconcile
@@ -202,6 +203,24 @@ These are hard-won lessons. Do not re-learn them.
 - URI-list fallback: `ComposeFilesDropped(DraggedFiles)` → parse → `ComposeAttachLoaded`
 - Message-to-folder: `dnd_source` on message rows, `dnd_destination` on sidebar folders (both in main view, works fine)
 - `actions.rs` has shared `remove_message_optimistic()` + `dispatch_move()` for Trash/Archive/DnD moves
+
+## Connection Health & Reconnect
+
+**The dead-session cascade** is the primary reliability hazard. melib's IDLE stream can go silent on a dead TCP connection (no error, no stream end — just stuck). The core (`imap.rs`) is a thin passthrough over melib and intentionally does not own connection health policy. All liveness detection and recovery lives in the GUI layer.
+
+The cascade before fixes: IDLE dies silently → 5-min periodic refresh reuses dead session → `SyncFoldersComplete(Err)` → conn_state set to "Connected" (masking the dead session) → next refresh repeats → client appears stuck until restart.
+
+**Current defenses (sync.rs, watch.rs):**
+- `SyncFoldersComplete(Err)` and `SyncMessagesComplete(Err)` now drop the session, set `conn_state = Error`, and schedule reconnect — sync failures are treated as connection failures
+- `AccountConnected(Err)` schedules retry with exponential backoff (5s → 15s → 30s → 60s cap) via `AccountState::reconnect_backoff()`. Counter resets on success.
+- Stuck refresh (45s timeout) force-clears `refresh_in_flight` + bumps epoch so stale completions are dropped, then starts a new refresh immediately
+- `WatchError` / `WatchEnded` set `last_error` for diagnostics and trigger 5s-delayed reconnect (which chains into the backoff retry on failure)
+
+**neverlight-mail-core boundary:** The core is shared across multiple clients. Connection health policy (backoff, session invalidation, stuck detection) belongs in each client's app layer, not in the core. The core's `ImapSession::watch()` returns melib's stream as-is.
+
+**Manual refresh:** F5 triggers `Message::Refresh`. Status pill click sends `Refresh` when Connected, `ForceReconnect` when Error/Disconnected.
+
+**Diagnostics panel** (sidebar, collapsible): per-account connection state + reconnect attempt count, last refresh/sync timing, refresh-in-flight indicator, non-zero anomaly counters only.
 
 ## Known Limitations
 
