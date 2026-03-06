@@ -27,6 +27,12 @@ fn revalidated_selected_folder_index(
 }
 
 impl AppModel {
+    pub(super) fn mailbox_belongs_to_account(&self, account_id: &str, mailbox_hash: u64) -> bool {
+        self.account_index(account_id)
+            .and_then(|idx| self.accounts.get(idx))
+            .is_some_and(|a| a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash))
+    }
+
     fn clear_selected_folder_projection(&mut self) {
         self.messages.clear();
         self.selected_message = None;
@@ -86,20 +92,53 @@ impl AppModel {
 
     /// Find the account index that owns a given mailbox_hash.
     pub(super) fn account_for_mailbox(&self, mailbox_hash: u64) -> Option<usize> {
-        self.accounts.iter().position(|a| {
-            a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash)
-        })
+        let mut matches = self
+            .accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash))
+            .map(|(i, _)| i);
+        let first = matches.next();
+        if first.is_some() && matches.next().is_some() {
+            log::error!(
+                "Ambiguous mailbox ownership for mailbox_hash {} across accounts",
+                mailbox_hash
+            );
+            return None;
+        }
+        first
     }
 
-    /// Get the session for a given mailbox_hash.
-    pub(super) fn session_for_mailbox(&self, mailbox_hash: u64) -> Option<Arc<ImapSession>> {
-        self.account_for_mailbox(mailbox_hash)
+    /// Find account index by explicit account hint and mailbox hash.
+    pub(super) fn account_for_account_mailbox(
+        &self,
+        account_id: &str,
+        mailbox_hash: u64,
+    ) -> Option<usize> {
+        let idx = self.account_index(account_id)?;
+        self.accounts
+            .get(idx)
+            .filter(|a| a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash))
+            .map(|_| idx)
+    }
+
+    /// Get the session for an explicit account + mailbox ownership pair.
+    pub(super) fn session_for_account_mailbox(
+        &self,
+        account_id: &str,
+        mailbox_hash: u64,
+    ) -> Option<Arc<ImapSession>> {
+        self.account_for_account_mailbox(account_id, mailbox_hash)
             .and_then(|i| self.accounts[i].session.clone())
     }
 
-    /// Get the folder_map for a given mailbox_hash's owning account.
-    pub(super) fn folder_map_for_mailbox(&self, mailbox_hash: u64) -> Option<&HashMap<String, u64>> {
-        self.account_for_mailbox(mailbox_hash)
+    /// Get the folder_map for an explicit account + mailbox ownership pair.
+    pub(super) fn folder_map_for_account_mailbox(
+        &self,
+        account_id: &str,
+        mailbox_hash: u64,
+    ) -> Option<&HashMap<String, u64>> {
+        self.account_for_account_mailbox(account_id, mailbox_hash)
             .map(|i| &self.accounts[i].folder_map)
     }
 

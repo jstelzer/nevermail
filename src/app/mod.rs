@@ -392,6 +392,10 @@ impl cosmic::Application for AppModel {
                     crate::ui::message_list::MessageListState {
                         messages: &self.messages,
                         visible_indices: &self.visible_indices,
+                        active_account_id: self
+                            .active_account
+                            .and_then(|i| self.accounts.get(i))
+                            .map(|a| a.config.id.as_str()),
                         selected: self.selected_message,
                         has_more: self.has_more_messages && !self.search_active,
                         collapsed_threads: &self.collapsed_threads,

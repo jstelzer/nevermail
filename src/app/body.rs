@@ -58,12 +58,18 @@ impl AppModel {
                 let body_task = if let Some(msg) = self.messages.get(index) {
                     let envelope_hash = msg.envelope_hash;
                     let account_id = self
-                        .account_for_mailbox(msg.mailbox_hash)
+                        .active_account
                         .and_then(|i| self.accounts.get(i))
-                        .map(|a| a.config.id.clone());
+                        .filter(|a| a.folders.iter().any(|f| f.mailbox_hash == msg.mailbox_hash))
+                        .map(|a| a.config.id.clone())
+                        .or_else(|| {
+                            self.account_for_mailbox(msg.mailbox_hash)
+                                .and_then(|i| self.accounts.get(i))
+                                .map(|a| a.config.id.clone())
+                        });
 
                     if let Some(cache) = &self.cache {
-                        let Some(account_id) = account_id.clone() else {
+                        let Some(account_id_for_cache) = account_id.clone() else {
                             let err = format!(
                                 "Cannot access body cache: no account for mailbox {}",
                                 msg.mailbox_hash
@@ -73,14 +79,20 @@ impl AppModel {
                             return auto_read_task;
                         };
                         let cache = cache.clone();
-                        let session = self.session_for_mailbox(msg.mailbox_hash)
+                        let session = account_id
+                            .as_deref()
+                            .and_then(|aid| {
+                                self.session_for_account_mailbox(aid, msg.mailbox_hash)
+                            })
                             .or_else(|| self.active_session());
                         self.status_message = "Loading message...".into();
                         cosmic::task::future(async move {
                             let load = async move {
                                 // Unified cache-first: try cache (includes attachments)
                                 if let Ok(Some((md_body, plain_body, attachments))) =
-                                    cache.load_body(account_id.clone(), envelope_hash).await
+                                    cache
+                                        .load_body(account_id_for_cache.clone(), envelope_hash)
+                                        .await
                                 {
                                     return Message::BodyLoaded {
                                         envelope_hash,
@@ -98,7 +110,7 @@ impl AppModel {
                                         Ok((ref md_body, ref plain_body, ref attachments)) => {
                                             if let Err(e) = cache
                                                 .save_body(
-                                                    account_id.clone(),
+                                                    account_id_for_cache.clone(),
                                                     envelope_hash,
                                                     md_body.clone(),
                                                     plain_body.clone(),
@@ -145,7 +157,11 @@ impl AppModel {
                         })
                     } else {
                         // No-cache fallback: direct IMAP fetch
-                        let session = self.session_for_mailbox(msg.mailbox_hash)
+                        let session = account_id
+                            .as_deref()
+                            .and_then(|aid| {
+                                self.session_for_account_mailbox(aid, msg.mailbox_hash)
+                            })
                             .or_else(|| self.active_session());
                         if let Some(session) = session {
                             self.status_message = "Loading message...".into();

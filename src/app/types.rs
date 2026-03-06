@@ -74,18 +74,30 @@ pub enum FlagIntentKind {
     ToggleStar,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingFlagIntent {
-    pub envelope_hash: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MailboxIdentity {
+    pub account_id: AccountId,
     pub mailbox_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MessageIdentity {
+    pub account_id: AccountId,
+    pub mailbox_hash: u64,
+    pub envelope_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFlagIntent {
+    pub message: MessageIdentity,
     pub kind: FlagIntentKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingMoveIntent {
-    pub envelope_hash: u64,
-    pub source_mailbox: u64,
-    pub dest_mailbox: u64,
+    pub message: MessageIdentity,
+    pub source: MailboxIdentity,
+    pub dest: MailboxIdentity,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,11 +184,11 @@ pub struct AppModel {
     /// Total messages per thread_id (for collapse indicators)
     pub(super) thread_sizes: HashMap<u64, usize>,
     /// Snapshot of optimistically removed messages for move rollback.
-    pub(super) pending_move_restore: HashMap<u64, (MessageSummary, usize)>,
+    pub(super) pending_move_restore: HashMap<MessageIdentity, (MessageSummary, usize)>,
     /// Latest flag operation epoch per envelope (stale completions are dropped).
-    pub(super) pending_flag_epochs: HashMap<u64, u64>,
+    pub(super) pending_flag_epochs: HashMap<MessageIdentity, u64>,
     /// Latest move operation epoch per envelope (stale completions are dropped).
-    pub(super) pending_move_epochs: HashMap<u64, u64>,
+    pub(super) pending_move_epochs: HashMap<MessageIdentity, u64>,
     /// Abort handles for true in-flight cancellation of superseded lane operations.
     pub(super) search_abort: Option<AbortHandle>,
     pub(super) folder_abort: Option<AbortHandle>,
@@ -204,8 +216,8 @@ pub struct AppModel {
     pub(super) flag_in_flight: bool,
     pub(super) pending_move_intent: Option<PendingMoveIntent>,
     pub(super) pending_flag_intent: Option<PendingFlagIntent>,
-    /// Recently notified envelope hashes (dedup watch Create events).
-    pub(super) notified_envelopes: HashSet<u64>,
+    /// Recently notified messages (dedup watch Create events).
+    pub(super) notified_envelopes: HashSet<MessageIdentity>,
     /// Diagnostics counters.
     pub(super) stale_apply_drop_count: u64,
     pub(super) toc_drift_count: u64,
@@ -327,20 +339,20 @@ pub enum Message {
     RunFlagIntent(PendingFlagIntent),
     RunMoveIntent(PendingMoveIntent),
     FlagOpComplete {
-        envelope_hash: u64,
+        message: MessageIdentity,
         epoch: u64,
         prev_flags: u8,
         result: Result<u8, String>,
     },
     MoveOpComplete {
-        envelope_hash: u64,
-        source_mailbox: u64,
+        message: MessageIdentity,
+        source: MailboxIdentity,
         epoch: u64,
         result: Result<(), String>,
     },
     MovePostconditionChecked {
-        envelope_hash: u64,
-        source_mailbox: u64,
+        message: MessageIdentity,
+        source: MailboxIdentity,
         epoch: u64,
         result: Result<bool, String>,
     },
@@ -387,9 +399,9 @@ pub enum Message {
 
     // Message-to-folder drag
     DragMessageToFolder {
-        envelope_hash: u64,
-        source_mailbox: u64,
-        dest_mailbox: u64,
+        message: MessageIdentity,
+        source: MailboxIdentity,
+        dest: MailboxIdentity,
     },
     FolderDragEnter(usize),
     FolderDragLeave,

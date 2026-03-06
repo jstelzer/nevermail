@@ -79,7 +79,18 @@ impl AppModel {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Reply;
                         // Auto-select owning account
-                        self.compose_account = self.account_for_mailbox(msg.mailbox_hash)
+                        self.compose_account = self
+                            .active_account
+                            .filter(|i| {
+                                self.accounts
+                                    .get(*i)
+                                    .is_some_and(|a| {
+                                        a.folders
+                                            .iter()
+                                            .any(|f| f.mailbox_hash == msg.mailbox_hash)
+                                    })
+                            })
+                            .or_else(|| self.account_for_mailbox(msg.mailbox_hash))
                             .unwrap_or(self.active_account.unwrap_or(0));
                         self.compose_to = msg.from.clone();
 
@@ -116,7 +127,18 @@ impl AppModel {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Forward;
                         // Auto-select owning account
-                        self.compose_account = self.account_for_mailbox(msg.mailbox_hash)
+                        self.compose_account = self
+                            .active_account
+                            .filter(|i| {
+                                self.accounts
+                                    .get(*i)
+                                    .is_some_and(|a| {
+                                        a.folders
+                                            .iter()
+                                            .any(|f| f.mailbox_hash == msg.mailbox_hash)
+                                    })
+                            })
+                            .or_else(|| self.account_for_mailbox(msg.mailbox_hash))
                             .unwrap_or(self.active_account.unwrap_or(0));
                         self.compose_to.clear();
 

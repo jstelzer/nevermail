@@ -2,7 +2,9 @@ use cosmic::iced::Length;
 use cosmic::widget;
 use cosmic::Element;
 
-use crate::app::{AccountState, ConnectionState, ErrorSurface, Message, Phase};
+use crate::app::{
+    AccountState, ConnectionState, ErrorSurface, MailboxIdentity, Message, MessageIdentity, Phase,
+};
 use crate::dnd_models::DraggedMessage;
 
 pub struct DiagnosticsState<'a> {
@@ -154,14 +156,25 @@ pub fn view<'a>(
                         }
 
                         let mailbox_hash = folder.mailbox_hash;
+                        let dest_account_id = acct.config.id.clone();
                         let dest = widget::dnd_destination::dnd_destination_for_data::<
                             DraggedMessage,
                             _,
                         >(btn, move |data, _action| match data {
                             Some(msg) => Message::DragMessageToFolder {
-                                envelope_hash: msg.envelope_hash,
-                                source_mailbox: msg.source_mailbox,
-                                dest_mailbox: mailbox_hash,
+                                message: MessageIdentity {
+                                    account_id: msg.source_account_id.clone(),
+                                    mailbox_hash: msg.source_mailbox,
+                                    envelope_hash: msg.envelope_hash,
+                                },
+                                source: MailboxIdentity {
+                                    account_id: msg.source_account_id,
+                                    mailbox_hash: msg.source_mailbox,
+                                },
+                                dest: MailboxIdentity {
+                                    account_id: dest_account_id.clone(),
+                                    mailbox_hash,
+                                },
                             },
                             None => Message::Noop,
                         })

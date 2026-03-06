@@ -6,7 +6,7 @@ use neverlight_mail_core::{BackendEvent, RefreshEventKind, Flag};
 use neverlight_mail_core::imap::ImapSession;
 use neverlight_mail_core::store;
 
-use super::{AppModel, ConnectionState, ImapWatchEvent, Message};
+use super::{AppModel, ConnectionState, ImapWatchEvent, Message, MessageIdentity};
 
 pub(super) fn imap_watch_stream(
     session: Arc<ImapSession>,
@@ -88,14 +88,19 @@ pub(super) fn imap_watch_stream(
 impl AppModel {
     pub(super) fn handle_watch(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::ImapEvent(ref _account_id, ImapWatchEvent::NewMessage {
+            Message::ImapEvent(ref account_id, ImapWatchEvent::NewMessage {
                 mailbox_hash,
                 envelope_hash,
                 subject,
                 from,
             }) => {
+                let identity = MessageIdentity {
+                    account_id: account_id.clone(),
+                    mailbox_hash,
+                    envelope_hash,
+                };
                 // Dedup: melib can emit multiple Create events for the same envelope
-                if !self.notified_envelopes.insert(envelope_hash) {
+                if !self.notified_envelopes.insert(identity) {
                     log::debug!("Skipping duplicate notification for envelope {}", envelope_hash);
                     return Task::none();
                 }
@@ -119,7 +124,9 @@ impl AppModel {
                 if let Some(acct_idx) = self.active_account {
                     if let Some(fi) = self.selected_folder {
                         if let Some(folder) = self.accounts.get(acct_idx).and_then(|a| a.folders.get(fi)) {
-                            if folder.mailbox_hash == mailbox_hash {
+                            if folder.mailbox_hash == mailbox_hash
+                                && self.accounts[acct_idx].config.id == *account_id
+                            {
                                 let refresh_task = self.dispatch(Message::Refresh);
                                 return cosmic::task::batch(vec![notif_task, refresh_task]);
                             }
@@ -128,7 +135,7 @@ impl AppModel {
                 }
                 return notif_task;
             }
-            Message::ImapEvent(_, ImapWatchEvent::MessageRemoved {
+            Message::ImapEvent(account_id, ImapWatchEvent::MessageRemoved {
                 mailbox_hash,
                 envelope_hash,
             }) => {
@@ -139,7 +146,13 @@ impl AppModel {
                             self.accounts.get(ai).and_then(|a| a.folders.get(fi))
                         })
                     })
-                    .is_some_and(|f| f.mailbox_hash == mailbox_hash);
+                    .is_some_and(|f| {
+                        f.mailbox_hash == mailbox_hash
+                            && self
+                                .active_account
+                                .and_then(|i| self.accounts.get(i))
+                                .is_some_and(|a| a.config.id == account_id)
+                    });
 
                 if viewing_mailbox {
                     // Find and remove from messages list
@@ -172,10 +185,8 @@ impl AppModel {
                     // Fire-and-forget cache cleanup
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
-                        let Some(account_id) = self
-                            .account_for_mailbox(mailbox_hash)
-                            .and_then(|i| self.accounts.get(i))
-                            .map(|a| a.config.id.clone())
+                        let Some(account_idx) =
+                            self.account_for_account_mailbox(&account_id, mailbox_hash)
                         else {
                             let err = format!(
                                 "Cannot remove cache message: no account for mailbox {}",
@@ -185,6 +196,7 @@ impl AppModel {
                             self.status_message = err;
                             return Task::none();
                         };
+                        let account_id = self.accounts[account_idx].config.id.clone();
                         return cosmic::task::future(async move {
                             if let Err(e) = cache.remove_message(account_id, envelope_hash).await {
                                 log::warn!("Failed to remove message from cache: {}", e);
@@ -195,7 +207,7 @@ impl AppModel {
                 }
             }
 
-            Message::ImapEvent(_, ImapWatchEvent::FlagsChanged {
+            Message::ImapEvent(account_id, ImapWatchEvent::FlagsChanged {
                 mailbox_hash,
                 envelope_hash,
                 flags,
@@ -206,7 +218,13 @@ impl AppModel {
                             self.accounts.get(ai).and_then(|a| a.folders.get(fi))
                         })
                     })
-                    .is_some_and(|f| f.mailbox_hash == mailbox_hash);
+                    .is_some_and(|f| {
+                        f.mailbox_hash == mailbox_hash
+                            && self
+                                .active_account
+                                .and_then(|i| self.accounts.get(i))
+                                .is_some_and(|a| a.config.id == account_id)
+                    });
 
                 if viewing_mailbox {
                     let (is_read, is_starred) = store::flags_from_u8(flags);
@@ -220,10 +238,8 @@ impl AppModel {
                     // Sync server flags and clear any pending op in cache
                     if let Some(cache) = &self.cache {
                         let cache = cache.clone();
-                        let Some(account_id) = self
-                            .account_for_mailbox(mailbox_hash)
-                            .and_then(|i| self.accounts.get(i))
-                            .map(|a| a.config.id.clone())
+                        let Some(account_idx) =
+                            self.account_for_account_mailbox(&account_id, mailbox_hash)
                         else {
                             let err = format!(
                                 "Cannot sync cache flags: no account for mailbox {}",
@@ -233,6 +249,7 @@ impl AppModel {
                             self.status_message = err;
                             return Task::none();
                         };
+                        let account_id = self.accounts[account_idx].config.id.clone();
                         return cosmic::task::future(async move {
                             if let Err(e) =
                                 cache.clear_pending_op(account_id, envelope_hash, flags).await

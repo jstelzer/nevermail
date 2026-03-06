@@ -3,8 +3,8 @@ use neverlight_mail_core::store;
 use neverlight_mail_core::{EnvelopeHash, Flag, FlagOp, MailboxHash};
 
 use super::{
-    ActionKind, AppModel, FlagIntentKind, Message, PendingFlagIntent, PendingMoveIntent,
-    Phase, RecoverableActionError, RetryAction,
+    ActionKind, AppModel, FlagIntentKind, MailboxIdentity, Message, MessageIdentity,
+    PendingFlagIntent, PendingMoveIntent, Phase, RecoverableActionError, RetryAction,
 };
 
 fn error_indicates_dead_session(e: &str) -> bool {
@@ -28,7 +28,7 @@ fn move_postcondition_retry_message(result: &Result<bool, String>) -> Option<Str
     }
 }
 
-fn queue_latest_intent<T: Copy>(
+fn queue_latest_intent<T>(
     in_flight: bool,
     pending: &mut Option<T>,
     incoming: T,
@@ -59,18 +59,42 @@ impl AppModel {
             }
             Message::ToggleRead(index) => {
                 if let Some(msg) = self.messages.get(index) {
+                    let Some(account_id) = self
+                        .account_for_mailbox(msg.mailbox_hash)
+                        .and_then(|i| self.accounts.get(i))
+                        .map(|a| a.config.id.clone())
+                    else {
+                        self.status_message =
+                            format!("Cannot resolve account for mailbox {}", msg.mailbox_hash);
+                        return Task::none();
+                    };
                     return self.queue_or_start_flag(PendingFlagIntent {
-                        envelope_hash: msg.envelope_hash,
-                        mailbox_hash: msg.mailbox_hash,
+                        message: MessageIdentity {
+                            account_id,
+                            mailbox_hash: msg.mailbox_hash,
+                            envelope_hash: msg.envelope_hash,
+                        },
                         kind: FlagIntentKind::ToggleRead,
                     });
                 }
             }
             Message::ToggleStar(index) => {
                 if let Some(msg) = self.messages.get(index) {
+                    let Some(account_id) = self
+                        .account_for_mailbox(msg.mailbox_hash)
+                        .and_then(|i| self.accounts.get(i))
+                        .map(|a| a.config.id.clone())
+                    else {
+                        self.status_message =
+                            format!("Cannot resolve account for mailbox {}", msg.mailbox_hash);
+                        return Task::none();
+                    };
                     return self.queue_or_start_flag(PendingFlagIntent {
-                        envelope_hash: msg.envelope_hash,
-                        mailbox_hash: msg.mailbox_hash,
+                        message: MessageIdentity {
+                            account_id,
+                            mailbox_hash: msg.mailbox_hash,
+                            envelope_hash: msg.envelope_hash,
+                        },
                         kind: FlagIntentKind::ToggleStar,
                     });
                 }
@@ -95,29 +119,39 @@ impl AppModel {
                 return self.run_move_intent(intent);
             }
             Message::DragMessageToFolder {
-                envelope_hash,
-                source_mailbox,
-                dest_mailbox,
+                message,
+                source,
+                dest,
             } => {
                 self.folder_drag_target = None;
 
                 // No-op if dragged onto the same folder
-                if source_mailbox == dest_mailbox {
+                if source == dest {
                     return Task::none();
                 }
 
                 // Prevent cross-account moves (IMAP MOVE is intra-server only)
-                let src_acct = self.account_for_mailbox(source_mailbox);
-                let dst_acct = self.account_for_mailbox(dest_mailbox);
-                if src_acct != dst_acct {
+                if source.account_id != dest.account_id {
                     self.status_message = "Cannot move messages between accounts".into();
+                    return Task::none();
+                }
+                if message.account_id != source.account_id
+                    || message.mailbox_hash != source.mailbox_hash
+                {
+                    self.status_message = "Cannot move message: source identity mismatch".into();
+                    return Task::none();
+                }
+                if !self.mailbox_belongs_to_account(&source.account_id, source.mailbox_hash)
+                    || !self.mailbox_belongs_to_account(&dest.account_id, dest.mailbox_hash)
+                {
+                    self.status_message = "Cannot move message: mailbox no longer available".into();
                     return Task::none();
                 }
 
                 return self.queue_or_start_move(PendingMoveIntent {
-                    envelope_hash,
-                    source_mailbox,
-                    dest_mailbox,
+                    message,
+                    source,
+                    dest,
                 });
             }
             Message::FolderDragEnter(i) => {
@@ -127,16 +161,16 @@ impl AppModel {
                 self.folder_drag_target = None;
             }
             Message::FlagOpComplete {
-                envelope_hash,
+                message,
                 epoch,
                 prev_flags,
                 result,
             } => {
-                if self.pending_flag_epochs.get(&envelope_hash).copied() != Some(epoch) {
+                if self.pending_flag_epochs.get(&message).copied() != Some(epoch) {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
-                self.pending_flag_epochs.remove(&envelope_hash);
+                self.pending_flag_epochs.remove(&message);
                 self.flag_in_flight = false;
 
                 let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -145,22 +179,8 @@ impl AppModel {
                         self.clear_error_surface();
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
-                            let Some(account_id) = self
-                                .messages
-                                .iter()
-                                .find(|m| m.envelope_hash == envelope_hash)
-                                .and_then(|m| self.account_for_mailbox(m.mailbox_hash))
-                                .and_then(|i| self.accounts.get(i))
-                                .map(|a| a.config.id.clone())
-                            else {
-                                let err = format!(
-                                    "Cannot clear cache pending op: no account for message {}",
-                                    envelope_hash
-                                );
-                                log::error!("{}", err);
-                                self.status_message = err;
-                                return self.try_run_next_flag_intent();
-                            };
+                            let account_id = message.account_id.clone();
+                            let envelope_hash = message.envelope_hash;
                             tasks.push(cosmic::task::future(async move {
                                 if let Err(e) = cache
                                     .clear_pending_op(account_id, envelope_hash, new_flags)
@@ -174,17 +194,12 @@ impl AppModel {
                     }
                     Err(e) => {
                         log::error!("Flag operation failed: {}", e);
-                        let mailbox_hash = self
-                            .messages
-                            .iter()
-                            .find(|m| m.envelope_hash == envelope_hash)
-                            .map(|m| m.mailbox_hash);
                         self.set_recoverable_action_error(RecoverableActionError {
                             action: ActionKind::Flag,
                             message: format!("Flag update failed: {}", e),
                             retry: RetryAction::Refresh,
-                            envelope_hash: Some(envelope_hash),
-                            mailbox_hash,
+                            envelope_hash: Some(message.envelope_hash),
+                            mailbox_hash: Some(message.mailbox_hash),
                         });
                         self.phase = Phase::Error;
 
@@ -192,7 +207,10 @@ impl AppModel {
                         if let Some(msg) = self
                             .messages
                             .iter_mut()
-                            .find(|m| m.envelope_hash == envelope_hash)
+                            .find(|m| {
+                                m.envelope_hash == message.envelope_hash
+                                    && m.mailbox_hash == message.mailbox_hash
+                            })
                         {
                             let (is_read, is_starred) = store::flags_from_u8(prev_flags);
                             msg.is_read = is_read;
@@ -201,22 +219,8 @@ impl AppModel {
 
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
-                            let Some(account_id) = self
-                                .messages
-                                .iter()
-                                .find(|m| m.envelope_hash == envelope_hash)
-                                .and_then(|m| self.account_for_mailbox(m.mailbox_hash))
-                                .and_then(|i| self.accounts.get(i))
-                                .map(|a| a.config.id.clone())
-                            else {
-                                let err = format!(
-                                    "Cannot revert cache pending op: no account for message {}",
-                                    envelope_hash
-                                );
-                                log::error!("{}", err);
-                                self.status_message = err;
-                                return self.try_run_next_flag_intent();
-                            };
+                            let account_id = message.account_id.clone();
+                            let envelope_hash = message.envelope_hash;
                             tasks.push(cosmic::task::future(async move {
                                 if let Err(e) =
                                     cache.revert_pending_op(account_id, envelope_hash).await
@@ -228,18 +232,16 @@ impl AppModel {
                         }
 
                         // Dead session likely caused the failure — drop and reconnect
-                        if let Some(mh) = mailbox_hash {
-                            if let Some(idx) = self.account_for_mailbox(mh) {
-                                if self.accounts[idx].session.is_none()
-                                    || error_indicates_dead_session(&e)
-                                {
-                                    tasks.push(
-                                        self.drop_session_and_schedule_reconnect(
-                                            idx,
-                                            "flag-failed",
-                                        ),
-                                    );
-                                }
+                        if let Some(idx) = self.account_index(&message.account_id) {
+                            if self.accounts[idx].session.is_none()
+                                || error_indicates_dead_session(&e)
+                            {
+                                tasks.push(
+                                    self.drop_session_and_schedule_reconnect(
+                                        idx,
+                                        "flag-failed",
+                                    ),
+                                );
                             }
                         }
                     }
@@ -253,37 +255,22 @@ impl AppModel {
                 return cosmic::task::batch(tasks);
             }
             Message::MoveOpComplete {
-                envelope_hash,
-                source_mailbox,
+                message,
+                source,
                 epoch,
                 result,
             } => {
-                if self.pending_move_epochs.get(&envelope_hash).copied() != Some(epoch) {
+                if self.pending_move_epochs.get(&message).copied() != Some(epoch) {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
-                self.pending_move_epochs.remove(&envelope_hash);
+                self.pending_move_epochs.remove(&message);
                 match result {
                     Ok(()) => {
                         self.clear_error_surface();
-                        let Some(account_id) = self
-                            .pending_move_restore
-                            .get(&envelope_hash)
-                            .and_then(|(msg, _)| self.account_for_mailbox(msg.mailbox_hash))
-                            .and_then(|i| self.accounts.get(i))
-                            .map(|a| a.config.id.clone())
-                        else {
-                            let err = format!(
-                                "Cannot remove moved message from cache: missing account for {}",
-                                envelope_hash
-                            );
-                            log::error!("{}", err);
-                            self.status_message = err;
-                            self.pending_move_restore.remove(&envelope_hash);
-                            self.mutation_in_flight = false;
-                            return self.try_run_next_move_intent();
-                        };
-                        self.pending_move_restore.remove(&envelope_hash);
+                        let account_id = message.account_id.clone();
+                        let envelope_hash = message.envelope_hash;
+                        self.pending_move_restore.remove(&message);
                         let mut tasks: Vec<Task<Message>> = Vec::new();
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
@@ -298,12 +285,16 @@ impl AppModel {
                                 Message::Noop
                             }));
                         }
-                        if let Some(session) = self.session_for_mailbox(source_mailbox) {
+                        if let Some(session) =
+                            self.session_for_account_mailbox(&source.account_id, source.mailbox_hash)
+                        {
                             let cache = self.cache.clone();
                             let account_id_for_check = account_id;
+                            let message_for_check = message.clone();
+                            let source_for_check = source.clone();
                             tasks.push(cosmic::task::future(async move {
                                 let result = session
-                                    .fetch_messages(MailboxHash(source_mailbox))
+                                    .fetch_messages(MailboxHash(source_for_check.mailbox_hash))
                                     .await
                                     .map(|messages| {
                                         let contains = messages
@@ -316,7 +307,7 @@ impl AppModel {
                                                 if let Err(e) = cache
                                                     .save_messages(
                                                         account_id_for_save,
-                                                        source_mailbox,
+                                                        source_for_check.mailbox_hash,
                                                         messages_for_save,
                                                     )
                                                     .await
@@ -331,8 +322,8 @@ impl AppModel {
                                         !contains
                                     });
                                 Message::MovePostconditionChecked {
-                                    envelope_hash,
-                                    source_mailbox,
+                                    message: message_for_check,
+                                    source: source_for_check,
                                     epoch,
                                     result,
                                 }
@@ -347,7 +338,7 @@ impl AppModel {
                     }
                     Err(e) => {
                         if let Some((msg, original_index)) =
-                            self.pending_move_restore.remove(&envelope_hash)
+                            self.pending_move_restore.remove(&message)
                         {
                             let insert_at = original_index.min(self.messages.len());
                             self.messages.insert(insert_at, msg);
@@ -359,15 +350,15 @@ impl AppModel {
                             action: ActionKind::Move,
                             message: format!("Move failed: {}", e),
                             retry: RetryAction::Refresh,
-                            envelope_hash: Some(envelope_hash),
-                            mailbox_hash: Some(source_mailbox),
+                            envelope_hash: Some(message.envelope_hash),
+                            mailbox_hash: Some(source.mailbox_hash),
                         });
                         self.phase = Phase::Error;
                         self.mutation_in_flight = false;
 
                         // Dead session likely caused the failure — drop and reconnect
                         let mut tasks: Vec<Task<Message>> = Vec::new();
-                        if let Some(idx) = self.account_for_mailbox(source_mailbox) {
+                        if let Some(idx) = self.account_index(&source.account_id) {
                             if self.accounts[idx].session.is_none()
                                 || error_indicates_dead_session(&e)
                             {
@@ -383,8 +374,8 @@ impl AppModel {
                 }
             }
             Message::MovePostconditionChecked {
-                envelope_hash,
-                source_mailbox: _source_mailbox,
+                message,
+                source,
                 epoch,
                 result,
             } => {
@@ -392,7 +383,7 @@ impl AppModel {
                 // If map entry is gone, the move already finalized; still allow same-epoch completion.
                 if self
                     .pending_move_epochs
-                    .get(&envelope_hash)
+                    .get(&message)
                     .is_some_and(|latest| *latest != epoch)
                 {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
@@ -400,7 +391,7 @@ impl AppModel {
                 }
                 self.mutation_in_flight = false;
                 let mut tasks: Vec<Task<Message>> = Vec::new();
-                if let Some(message) = move_postcondition_retry_message(&result) {
+                if let Some(retry_message) = move_postcondition_retry_message(&result) {
                     self.postcondition_failure_count =
                         self.postcondition_failure_count.saturating_add(1);
                     if matches!(result, Ok(false)) {
@@ -408,10 +399,10 @@ impl AppModel {
                     }
                     self.set_recoverable_action_error(RecoverableActionError {
                         action: ActionKind::Move,
-                        message,
+                        message: retry_message,
                         retry: RetryAction::Refresh,
-                        envelope_hash: Some(envelope_hash),
-                        mailbox_hash: Some(_source_mailbox),
+                        envelope_hash: Some(message.envelope_hash),
+                        mailbox_hash: Some(source.mailbox_hash),
                     });
                     if let Err(e) = result {
                         log::warn!("Move postcondition check failed: {}", e);
@@ -458,10 +449,14 @@ impl AppModel {
     }
 
     fn run_flag_intent(&mut self, intent: PendingFlagIntent) -> Task<Message> {
+        let message_id = intent.message.clone();
         let Some(index) = self
             .messages
             .iter()
-            .position(|m| m.envelope_hash == intent.envelope_hash)
+            .position(|m| {
+                m.envelope_hash == message_id.envelope_hash
+                    && m.mailbox_hash == message_id.mailbox_hash
+            })
         else {
             return self.try_run_next_flag_intent();
         };
@@ -516,23 +511,12 @@ impl AppModel {
 
         if let Some(cache) = &self.cache {
             let cache = cache.clone();
-            let Some(account_id) = self
-                .account_for_mailbox(intent.mailbox_hash)
-                .and_then(|i| self.accounts.get(i))
-                .map(|a| a.config.id.clone())
-            else {
-                let err = format!(
-                    "Cannot update cache flags: no account for mailbox {}",
-                    intent.mailbox_hash
-                );
-                log::error!("{}", err);
-                self.status_message = err;
-                return Task::none();
-            };
+            let account_id = message_id.account_id.clone();
+            let envelope_hash = message_id.envelope_hash;
             let op = pending_op.clone();
             tasks.push(cosmic::task::future(async move {
                 if let Err(e) = cache
-                    .update_flags(account_id, intent.envelope_hash, new_flags, op)
+                    .update_flags(account_id, envelope_hash, new_flags, op)
                     .await
                 {
                     log::warn!("Failed to update cache flags: {}", e);
@@ -541,22 +525,25 @@ impl AppModel {
             }));
         }
 
-        if let Some(session) = self.session_for_mailbox(intent.mailbox_hash) {
+        if let Some(session) =
+            self.session_for_account_mailbox(&message_id.account_id, message_id.mailbox_hash)
+        {
             self.flag_epoch = self.flag_epoch.saturating_add(1);
             let epoch = self.flag_epoch;
-            self.pending_flag_epochs.insert(intent.envelope_hash, epoch);
+            self.pending_flag_epochs.insert(message_id.clone(), epoch);
             self.flag_in_flight = true;
             op_epoch = Some(epoch);
+            let message_for_completion = message_id.clone();
             tasks.push(cosmic::task::future(async move {
                 let result = session
                     .set_flags(
-                        EnvelopeHash(intent.envelope_hash),
-                        MailboxHash(intent.mailbox_hash),
+                        EnvelopeHash(message_for_completion.envelope_hash),
+                        MailboxHash(message_for_completion.mailbox_hash),
                         vec![flag_op],
                     )
                     .await;
                 Message::FlagOpComplete {
-                    envelope_hash: intent.envelope_hash,
+                    message: message_for_completion,
                     epoch,
                     prev_flags,
                     result: result.map(|_| new_flags),
@@ -565,7 +552,7 @@ impl AppModel {
         }
 
         if op_epoch.is_none() {
-            self.pending_flag_epochs.remove(&intent.envelope_hash);
+            self.pending_flag_epochs.remove(&message_id);
             self.flag_in_flight = false;
         }
         if tasks.is_empty() {
@@ -588,26 +575,26 @@ impl AppModel {
     }
 
     fn run_move_intent(&mut self, intent: PendingMoveIntent) -> Task<Message> {
-        if intent.source_mailbox == intent.dest_mailbox {
+        if intent.source == intent.dest {
             return self.try_run_next_move_intent();
         }
-        if self.session_for_mailbox(intent.source_mailbox).is_none() {
+        if self
+            .session_for_account_mailbox(&intent.source.account_id, intent.source.mailbox_hash)
+            .is_none()
+        {
             self.status_message = "Move failed: account is offline".into();
             return self.try_run_next_move_intent();
         }
         let Some(index) = self.messages.iter().position(|m| {
-            m.envelope_hash == intent.envelope_hash && m.mailbox_hash == intent.source_mailbox
+            m.envelope_hash == intent.message.envelope_hash
+                && m.mailbox_hash == intent.source.mailbox_hash
         }) else {
             return self.try_run_next_move_intent();
         };
         if let Some(removed) = self.remove_message_optimistic(index) {
             self.pending_move_restore
-                .insert(intent.envelope_hash, (removed, index));
-            return self.dispatch_move(
-                intent.envelope_hash,
-                intent.source_mailbox,
-                intent.dest_mailbox,
-            );
+                .insert(intent.message.clone(), (removed, index));
+            return self.dispatch_move(intent.message, intent.source, intent.dest);
         }
         self.try_run_next_move_intent()
     }
@@ -615,16 +602,32 @@ impl AppModel {
     fn trash_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
         if let Some(msg) = self.messages.get(index) {
             let mailbox_hash = msg.mailbox_hash;
-            if let Some(folder_map) = self.folder_map_for_mailbox(mailbox_hash) {
+            let account_id = self
+                .account_for_mailbox(mailbox_hash)
+                .and_then(|i| self.accounts.get(i))
+                .map(|a| a.config.id.clone())?;
+            if let Some(folder_map) =
+                self.folder_map_for_account_mailbox(&account_id, mailbox_hash)
+            {
                 if let Some(trash_hash) = folder_map
                     .get("Trash")
                     .or_else(|| folder_map.get("INBOX.Trash"))
                     .copied()
                 {
                     return Some(PendingMoveIntent {
-                        envelope_hash: msg.envelope_hash,
-                        source_mailbox: msg.mailbox_hash,
-                        dest_mailbox: trash_hash,
+                        message: MessageIdentity {
+                            account_id: account_id.clone(),
+                            mailbox_hash: msg.mailbox_hash,
+                            envelope_hash: msg.envelope_hash,
+                        },
+                        source: MailboxIdentity {
+                            account_id: account_id.clone(),
+                            mailbox_hash: msg.mailbox_hash,
+                        },
+                        dest: MailboxIdentity {
+                            account_id,
+                            mailbox_hash: trash_hash,
+                        },
                     });
                 }
             }
@@ -636,16 +639,32 @@ impl AppModel {
     fn archive_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
         if let Some(msg) = self.messages.get(index) {
             let mailbox_hash = msg.mailbox_hash;
-            if let Some(folder_map) = self.folder_map_for_mailbox(mailbox_hash) {
+            let account_id = self
+                .account_for_mailbox(mailbox_hash)
+                .and_then(|i| self.accounts.get(i))
+                .map(|a| a.config.id.clone())?;
+            if let Some(folder_map) =
+                self.folder_map_for_account_mailbox(&account_id, mailbox_hash)
+            {
                 if let Some(archive_hash) = folder_map
                     .get("Archive")
                     .or_else(|| folder_map.get("INBOX.Archive"))
                     .copied()
                 {
                     return Some(PendingMoveIntent {
-                        envelope_hash: msg.envelope_hash,
-                        source_mailbox: msg.mailbox_hash,
-                        dest_mailbox: archive_hash,
+                        message: MessageIdentity {
+                            account_id: account_id.clone(),
+                            mailbox_hash: msg.mailbox_hash,
+                            envelope_hash: msg.envelope_hash,
+                        },
+                        source: MailboxIdentity {
+                            account_id: account_id.clone(),
+                            mailbox_hash: msg.mailbox_hash,
+                        },
+                        dest: MailboxIdentity {
+                            account_id,
+                            mailbox_hash: archive_hash,
+                        },
                     });
                 }
             }
@@ -686,25 +705,20 @@ impl AppModel {
     }
 
     /// Dispatch IMAP move + cache update tasks for a message move operation.
-    fn dispatch_move(&mut self, envelope_hash: u64, source_mailbox: u64, dest_mailbox: u64) -> Task<Message> {
+    fn dispatch_move(
+        &mut self,
+        message: MessageIdentity,
+        source: MailboxIdentity,
+        dest: MailboxIdentity,
+    ) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
 
         if let Some(cache) = &self.cache {
             let cache = cache.clone();
-            let Some(account_id) = self
-                .account_for_mailbox(source_mailbox)
-                .and_then(|i| self.accounts.get(i))
-                .map(|a| a.config.id.clone())
-            else {
-                let err = format!(
-                    "Cannot queue move cache update: no account for source mailbox {}",
-                    source_mailbox
-                );
-                log::error!("{}", err);
-                self.status_message = err;
-                return Task::none();
-            };
             let new_flags = store::flags_to_u8(true, false);
+            let account_id = source.account_id.clone();
+            let envelope_hash = message.envelope_hash;
+            let dest_mailbox = dest.mailbox_hash;
             tasks.push(cosmic::task::future(async move {
                 if let Err(e) = cache
                     .update_flags(
@@ -721,22 +735,26 @@ impl AppModel {
             }));
         }
 
-        if let Some(session) = self.session_for_mailbox(source_mailbox) {
+        if let Some(session) =
+            self.session_for_account_mailbox(&source.account_id, source.mailbox_hash)
+        {
             self.mutation_in_flight = true;
             self.mutation_epoch = self.mutation_epoch.saturating_add(1);
             let epoch = self.mutation_epoch;
-            self.pending_move_epochs.insert(envelope_hash, epoch);
+            self.pending_move_epochs.insert(message.clone(), epoch);
+            let message_for_completion = message.clone();
+            let source_for_completion = source.clone();
             tasks.push(cosmic::task::future(async move {
                 let result = session
                     .move_messages(
-                        EnvelopeHash(envelope_hash),
-                        MailboxHash(source_mailbox),
-                        MailboxHash(dest_mailbox),
+                        EnvelopeHash(message_for_completion.envelope_hash),
+                        MailboxHash(source_for_completion.mailbox_hash),
+                        MailboxHash(dest.mailbox_hash),
                     )
                     .await;
                 Message::MoveOpComplete {
-                    envelope_hash,
-                    source_mailbox,
+                    message: message_for_completion,
+                    source: source_for_completion,
                     epoch,
                     result,
                 }
@@ -754,7 +772,9 @@ impl AppModel {
 #[cfg(test)]
 mod tests {
     use super::{move_postcondition_retry_message, queue_latest_intent};
-    use crate::app::{FlagIntentKind, PendingFlagIntent, PendingMoveIntent};
+    use crate::app::{
+        FlagIntentKind, MailboxIdentity, MessageIdentity, PendingFlagIntent, PendingMoveIntent,
+    };
 
     #[test]
     fn move_postcondition_ok_true_is_noop() {
@@ -780,21 +800,30 @@ mod tests {
     fn flag_lane_queue_keeps_only_latest_pending_intent() {
         let mut pending: Option<PendingFlagIntent> = None;
         let first = PendingFlagIntent {
-            envelope_hash: 1,
-            mailbox_hash: 10,
+            message: MessageIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 10,
+                envelope_hash: 1,
+            },
             kind: FlagIntentKind::ToggleRead,
         };
         let second = PendingFlagIntent {
-            envelope_hash: 2,
-            mailbox_hash: 10,
+            message: MessageIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 10,
+                envelope_hash: 2,
+            },
             kind: FlagIntentKind::ToggleStar,
         };
 
-        assert_eq!(queue_latest_intent(false, &mut pending, first), Some(first));
+        assert_eq!(
+            queue_latest_intent(false, &mut pending, first.clone()),
+            Some(first.clone())
+        );
         assert_eq!(pending, None);
-        assert_eq!(queue_latest_intent(true, &mut pending, first), None);
+        assert_eq!(queue_latest_intent(true, &mut pending, first.clone()), None);
         assert_eq!(pending, Some(first));
-        assert_eq!(queue_latest_intent(true, &mut pending, second), None);
+        assert_eq!(queue_latest_intent(true, &mut pending, second.clone()), None);
         assert_eq!(pending, Some(second));
     }
 
@@ -802,21 +831,44 @@ mod tests {
     fn mutation_lane_queue_keeps_only_latest_pending_intent() {
         let mut pending: Option<PendingMoveIntent> = None;
         let first = PendingMoveIntent {
-            envelope_hash: 7,
-            source_mailbox: 11,
-            dest_mailbox: 22,
+            message: MessageIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 11,
+                envelope_hash: 7,
+            },
+            source: MailboxIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 11,
+            },
+            dest: MailboxIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 22,
+            },
         };
         let second = PendingMoveIntent {
-            envelope_hash: 8,
-            source_mailbox: 11,
-            dest_mailbox: 33,
+            message: MessageIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 11,
+                envelope_hash: 8,
+            },
+            source: MailboxIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 11,
+            },
+            dest: MailboxIdentity {
+                account_id: "a1".into(),
+                mailbox_hash: 33,
+            },
         };
 
-        assert_eq!(queue_latest_intent(false, &mut pending, first), Some(first));
+        assert_eq!(
+            queue_latest_intent(false, &mut pending, first.clone()),
+            Some(first.clone())
+        );
         assert_eq!(pending, None);
-        assert_eq!(queue_latest_intent(true, &mut pending, first), None);
+        assert_eq!(queue_latest_intent(true, &mut pending, first.clone()), None);
         assert_eq!(pending, Some(first));
-        assert_eq!(queue_latest_intent(true, &mut pending, second), None);
+        assert_eq!(queue_latest_intent(true, &mut pending, second.clone()), None);
         assert_eq!(pending, Some(second));
     }
 }
