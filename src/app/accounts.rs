@@ -123,6 +123,61 @@ impl AppModel {
         self.accounts.iter().position(|a| a.config.id == account_id)
     }
 
+    /// Drop a dead session and schedule reconnect with backoff.
+    pub(super) fn drop_session_and_schedule_reconnect(
+        &mut self,
+        account_idx: usize,
+        reason: &str,
+    ) -> Task<Message> {
+        let Some(acct) = self.accounts.get_mut(account_idx) else {
+            return Task::none();
+        };
+        let label = acct.config.label.clone();
+        log::warn!("Dropping session for '{}' (reason: {})", label, reason);
+        acct.session = None;
+        acct.conn_state = super::ConnectionState::Error(format!("Session lost: {}", reason));
+        acct.last_error = Some(format!("Session lost: {}", reason));
+        let delay = acct.reconnect_backoff();
+        let aid = acct.config.id.clone();
+        log::info!(
+            "Scheduling reconnect for '{}' in {}s (reason: {})",
+            label,
+            delay.as_secs(),
+            reason,
+        );
+        cosmic::task::future(async move {
+            tokio::time::sleep(delay).await;
+            Message::ForceReconnect(aid)
+        })
+    }
+
+    /// Reconcile a folder's unread count from the actual messages in the list.
+    /// Corrects sidebar badge drift after flag ops or server-side changes.
+    pub(super) fn reconcile_folder_unread_count(&mut self, account_id: &str, mailbox_hash: u64) {
+        let unread = self
+            .messages
+            .iter()
+            .filter(|m| m.mailbox_hash == mailbox_hash && !m.is_read)
+            .count() as u32;
+        if let Some(idx) = self.account_index(account_id) {
+            if let Some(folder) = self.accounts[idx]
+                .folders
+                .iter_mut()
+                .find(|f| f.mailbox_hash == mailbox_hash)
+            {
+                if folder.unread_count != unread {
+                    log::debug!(
+                        "Reconciling unread count for '{}': {} → {}",
+                        folder.name,
+                        folder.unread_count,
+                        unread,
+                    );
+                    folder.unread_count = unread;
+                }
+            }
+        }
+    }
+
     /// Refresh the cached compose labels (account labels + from addresses)
     /// so dialog() can borrow them with &self lifetime.
     pub(super) fn refresh_compose_cache(&mut self) {

@@ -7,6 +7,16 @@ use super::{
     Phase, RecoverableActionError, RetryAction,
 };
 
+fn error_indicates_dead_session(e: &str) -> bool {
+    let lower = e.to_lowercase();
+    lower.contains("broken pipe")
+        || lower.contains("connection reset")
+        || lower.contains("timed out")
+        || lower.contains("not connected")
+        || lower.contains("connection refused")
+        || lower.contains("eof")
+}
+
 fn move_postcondition_retry_message(result: &Result<bool, String>) -> Option<String> {
     match result {
         Ok(true) => None,
@@ -164,16 +174,17 @@ impl AppModel {
                     }
                     Err(e) => {
                         log::error!("Flag operation failed: {}", e);
+                        let mailbox_hash = self
+                            .messages
+                            .iter()
+                            .find(|m| m.envelope_hash == envelope_hash)
+                            .map(|m| m.mailbox_hash);
                         self.set_recoverable_action_error(RecoverableActionError {
                             action: ActionKind::Flag,
                             message: format!("Flag update failed: {}", e),
                             retry: RetryAction::Refresh,
                             envelope_hash: Some(envelope_hash),
-                            mailbox_hash: self
-                                .messages
-                                .iter()
-                                .find(|m| m.envelope_hash == envelope_hash)
-                                .map(|m| m.mailbox_hash),
+                            mailbox_hash,
                         });
                         self.phase = Phase::Error;
 
@@ -214,6 +225,22 @@ impl AppModel {
                                 }
                                 Message::Noop
                             }));
+                        }
+
+                        // Dead session likely caused the failure — drop and reconnect
+                        if let Some(mh) = mailbox_hash {
+                            if let Some(idx) = self.account_for_mailbox(mh) {
+                                if self.accounts[idx].session.is_none()
+                                    || error_indicates_dead_session(&e)
+                                {
+                                    tasks.push(
+                                        self.drop_session_and_schedule_reconnect(
+                                            idx,
+                                            "flag-failed",
+                                        ),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -337,7 +364,21 @@ impl AppModel {
                         });
                         self.phase = Phase::Error;
                         self.mutation_in_flight = false;
-                        return self.try_run_next_move_intent();
+
+                        // Dead session likely caused the failure — drop and reconnect
+                        let mut tasks: Vec<Task<Message>> = Vec::new();
+                        if let Some(idx) = self.account_for_mailbox(source_mailbox) {
+                            if self.accounts[idx].session.is_none()
+                                || error_indicates_dead_session(&e)
+                            {
+                                tasks.push(self.drop_session_and_schedule_reconnect(
+                                    idx,
+                                    "move-failed",
+                                ));
+                            }
+                        }
+                        tasks.push(self.try_run_next_move_intent());
+                        return cosmic::task::batch(tasks);
                     }
                 }
             }
@@ -614,7 +655,7 @@ impl AppModel {
     }
 
     /// Optimistically remove a message from the list and adjust selection.
-    fn remove_message_optimistic(
+    pub(super) fn remove_message_optimistic(
         &mut self,
         index: usize,
     ) -> Option<neverlight_mail_core::models::MessageSummary> {

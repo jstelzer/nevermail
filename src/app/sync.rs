@@ -174,6 +174,11 @@ impl AppModel {
 
                 self.recompute_visible();
 
+                // Reconcile sidebar unread count from actual message flags
+                if self.messages_offset == 0 {
+                    self.reconcile_folder_unread_count(&account_id, mailbox_hash);
+                }
+
                 if !self.messages.is_empty() {
                     self.status_message =
                         format!("{} messages", self.messages.len());

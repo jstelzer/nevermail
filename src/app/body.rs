@@ -7,6 +7,13 @@ use neverlight_mail_core::EnvelopeHash;
 
 use super::{AppModel, Message};
 
+fn body_error_indicates_stale_message(e: &str) -> bool {
+    let lower = e.to_lowercase();
+    lower.contains("not found")
+        || lower.contains("deleted before you requested")
+        || lower.contains("local cache")
+}
+
 fn should_apply_body_result(
     current_epoch: u64,
     incoming_epoch: u64,
@@ -286,6 +293,58 @@ impl AppModel {
                         return Task::none();
                     }
                 }
+
+                // Stale message: cached TOC has it but server doesn't.
+                // Evict from the list and trigger a refresh to reconcile.
+                if body_error_indicates_stale_message(&e) {
+                    log::warn!(
+                        "Evicting stale message {} (body error: {})",
+                        envelope_hash,
+                        e
+                    );
+                    if let Some(pos) = self
+                        .messages
+                        .iter()
+                        .position(|m| m.envelope_hash == envelope_hash)
+                    {
+                        self.remove_message_optimistic(pos);
+                        // Evict from cache too
+                        if let Some(cache) = &self.cache {
+                            let cache = cache.clone();
+                            if let Some(account_id) = self
+                                .account_for_mailbox(
+                                    self.selected_mailbox_hash.unwrap_or(0),
+                                )
+                                .and_then(|i| self.accounts.get(i))
+                                .map(|a| a.config.id.clone())
+                            {
+                                let evict_task = cosmic::task::future(async move {
+                                    if let Err(e) = cache
+                                        .remove_message(account_id, envelope_hash)
+                                        .await
+                                    {
+                                        log::warn!(
+                                            "Failed to evict stale message from cache: {}",
+                                            e
+                                        );
+                                    }
+                                    Message::Noop
+                                });
+                                let refresh_task = self.dispatch(Message::Refresh);
+                                return cosmic::task::batch(vec![evict_task, refresh_task]);
+                            }
+                        }
+                        return self.dispatch(Message::Refresh);
+                    }
+                    self.selected_message = None;
+                    self.preview_body.clear();
+                    self.preview_markdown.clear();
+                    self.preview_attachments.clear();
+                    self.preview_image_handles.clear();
+                    self.status_message = "Message no longer exists on server".into();
+                    return self.dispatch(Message::Refresh);
+                }
+
                 let msg = format!("Failed to load message body: {}", e);
                 self.preview_markdown = markdown::parse(&msg).collect();
                 self.preview_body = msg;
