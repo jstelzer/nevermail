@@ -159,4 +159,4 @@ Neverlight Mail targets standard IMAP providers (Runbox, Fastmail, Migadu, self-
 
 ## License
 
-GPL-3.0-or-later
+MIT OR Apache-2.0

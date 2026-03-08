@@ -2324,8 +2324,6 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 [[package]]
 name = "html-safe-md"
 version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cb2a9e543e92d208ab72d6ddd6fadf6eb4743bfc46bc40c513bfe1d647bc38"
 dependencies = [
  "ammonia",
  "html2md",
