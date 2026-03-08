@@ -1,25 +1,25 @@
-use std::collections::HashMap;
-
 use cosmic::app::Task;
 
+use neverlight_mail_core::client::JmapClient;
 use neverlight_mail_core::config::ConfigNeedsInput;
 use neverlight_mail_core::models::Folder;
 use neverlight_mail_core::setup::SetupModel;
 
-use super::{AppModel, MailSession, Message, Phase};
+use super::{AppModel, Message, Phase};
 
 fn revalidated_selected_folder_index(
-    selected_mailbox_hash: Option<u64>,
+    selected_mailbox_id: Option<&str>,
     selected_folder_index: Option<usize>,
     folders: &[Folder],
-) -> (Option<usize>, Option<u64>, bool) {
-    let canonical_hash = selected_mailbox_hash
-        .or_else(|| selected_folder_index.and_then(|idx| folders.get(idx).map(|f| f.mailbox_hash)));
-    let Some(hash) = canonical_hash else {
+) -> (Option<usize>, Option<String>, bool) {
+    let canonical_id = selected_mailbox_id
+        .map(|s| s.to_string())
+        .or_else(|| selected_folder_index.and_then(|idx| folders.get(idx).map(|f| f.mailbox_id.clone())));
+    let Some(ref id) = canonical_id else {
         return (selected_folder_index, None, false);
     };
-    if let Some(folder_idx) = folders.iter().position(|f| f.mailbox_hash == hash) {
-        return (Some(folder_idx), Some(hash), false);
+    if let Some(folder_idx) = folders.iter().position(|f| f.mailbox_id == *id) {
+        return (Some(folder_idx), Some(id.clone()), false);
     }
     (None, None, true)
 }
@@ -28,7 +28,7 @@ impl AppModel {
     fn clear_active_selection(&mut self) {
         self.active_account = None;
         self.selected_folder = None;
-        self.selected_mailbox_hash = None;
+        self.selected_mailbox_id = None;
         self.selected_folder_evicted = false;
         self.clear_selected_folder_projection();
     }
@@ -46,13 +46,13 @@ impl AppModel {
         self.active_account = Some(account_idx);
         if let Some(folder_idx) = folder_idx {
             self.selected_folder = Some(folder_idx);
-            self.selected_mailbox_hash = Some(acct.folders[folder_idx].mailbox_hash);
+            self.selected_mailbox_id = Some(acct.folders[folder_idx].mailbox_id.clone());
             self.selected_folder_evicted = false;
             return self.dispatch(Message::SelectFolder(account_idx, folder_idx));
         }
 
         self.selected_folder = None;
-        self.selected_mailbox_hash = None;
+        self.selected_mailbox_id = None;
         self.selected_folder_evicted = false;
         self.clear_selected_folder_projection();
         Task::none()
@@ -72,7 +72,7 @@ impl AppModel {
 
         let removed_id = removed.config.id.clone();
         let removed_username = removed.config.username.clone();
-        let removed_server = removed.config.imap_server.clone();
+        let removed_jmap_url = removed.config.jmap_url.clone();
 
         // Keep compose account index valid.
         if self.accounts.is_empty() {
@@ -96,12 +96,9 @@ impl AppModel {
             }
         }
 
-        // Clean up keyring passwords
-        if let Err(e) = neverlight_mail_core::keyring::delete_password(&removed_username, &removed_server) {
-            log::warn!("Failed to delete IMAP password from keyring: {}", e);
-        }
-        if let Err(e) = neverlight_mail_core::keyring::delete_smtp_password(&removed_id) {
-            log::debug!("No SMTP password to delete from keyring: {}", e);
+        // Clean up keyring token
+        if let Err(e) = neverlight_mail_core::keyring::delete_password(&removed_username, &removed_jmap_url) {
+            log::warn!("Failed to delete token from keyring: {}", e);
         }
 
         self.status_message = "Account removed".into();
@@ -120,10 +117,10 @@ impl AppModel {
         cosmic::task::batch(tasks)
     }
 
-    pub(super) fn mailbox_belongs_to_account(&self, account_id: &str, mailbox_hash: u64) -> bool {
+    pub(super) fn mailbox_belongs_to_account(&self, account_id: &str, mailbox_id: &str) -> bool {
         self.account_index(account_id)
             .and_then(|idx| self.accounts.get(idx))
-            .is_some_and(|a| a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash))
+            .is_some_and(|a| a.folders.iter().any(|f| f.mailbox_id == mailbox_id))
     }
 
     fn clear_selected_folder_projection(&mut self) {
@@ -140,17 +137,17 @@ impl AppModel {
         self.recompute_visible();
     }
 
-    /// Keep selected folder anchored to canonical mailbox hash after any folder snapshot apply.
+    /// Keep selected folder anchored to canonical mailbox ID after any folder snapshot apply.
     pub(super) fn revalidate_selected_folder(&mut self) {
         let Some(active_idx) = self.active_account else {
             self.selected_folder = None;
-            self.selected_mailbox_hash = None;
+            self.selected_mailbox_id = None;
             self.selected_folder_evicted = false;
             return;
         };
         let Some(active) = self.accounts.get(active_idx) else {
             self.selected_folder = None;
-            self.selected_mailbox_hash = None;
+            self.selected_mailbox_id = None;
             self.selected_folder_evicted = true;
             self.clear_selected_folder_projection();
             self.status_message = "Selected folder evicted (account missing)".into();
@@ -158,23 +155,23 @@ impl AppModel {
             return;
         };
 
-        let canonical_hash = self.selected_mailbox_hash.or_else(|| {
+        let canonical_id = self.selected_mailbox_id.clone().or_else(|| {
             self.selected_folder
                 .and_then(|fi| active.folders.get(fi))
-                .map(|f| f.mailbox_hash)
+                .map(|f| f.mailbox_id.clone())
         });
 
-        let Some(hash) = canonical_hash else {
+        let Some(ref id) = canonical_id else {
             self.selected_folder_evicted = false;
             return;
         };
-        let (folder_idx, mailbox_hash, evicted) = revalidated_selected_folder_index(
-            Some(hash),
+        let (folder_idx, mailbox_id, evicted) = revalidated_selected_folder_index(
+            Some(id),
             self.selected_folder,
             &active.folders,
         );
         self.selected_folder = folder_idx;
-        self.selected_mailbox_hash = mailbox_hash;
+        self.selected_mailbox_id = mailbox_id;
         self.selected_folder_evicted = evicted;
         if evicted {
             self.clear_selected_folder_projection();
@@ -183,37 +180,10 @@ impl AppModel {
         }
     }
 
-    /// Find account index by explicit account hint and mailbox hash.
-    pub(super) fn account_for_account_mailbox(
-        &self,
-        account_id: &str,
-        mailbox_hash: u64,
-    ) -> Option<usize> {
-        let idx = self.account_index(account_id)?;
-        self.accounts
-            .get(idx)
-            .filter(|a| a.folders.iter().any(|f| f.mailbox_hash == mailbox_hash))
-            .map(|_| idx)
-    }
-
-    /// Get the session for an explicit account + mailbox ownership pair.
-    pub(super) fn session_for_account_mailbox(
-        &self,
-        account_id: &str,
-        mailbox_hash: u64,
-    ) -> Option<MailSession> {
-        self.account_for_account_mailbox(account_id, mailbox_hash)
-            .and_then(|i| self.accounts[i].session.clone())
-    }
-
-    /// Get the folder_map for an explicit account + mailbox ownership pair.
-    pub(super) fn folder_map_for_account_mailbox(
-        &self,
-        account_id: &str,
-        mailbox_hash: u64,
-    ) -> Option<&HashMap<String, u64>> {
-        self.account_for_account_mailbox(account_id, mailbox_hash)
-            .map(|i| &self.accounts[i].folder_map)
+    /// Get the client for an explicit account ID.
+    pub(super) fn client_for_account(&self, account_id: &str) -> Option<JmapClient> {
+        self.account_index(account_id)
+            .and_then(|i| self.accounts[i].client.clone())
     }
 
     /// Get the active account's ID, or empty string.
@@ -224,11 +194,11 @@ impl AppModel {
             .unwrap_or_default()
     }
 
-    /// Get the active account's session.
-    pub(super) fn active_session(&self) -> Option<MailSession> {
+    /// Get the active account's client.
+    pub(super) fn active_client(&self) -> Option<JmapClient> {
         self.active_account
             .and_then(|i| self.accounts.get(i))
-            .and_then(|a| a.session.clone())
+            .and_then(|a| a.client.clone())
     }
 
     /// Find account index by ID.
@@ -236,7 +206,7 @@ impl AppModel {
         self.accounts.iter().position(|a| a.config.id == account_id)
     }
 
-    /// Drop a dead session and schedule reconnect with backoff.
+    /// Drop a dead client and schedule reconnect with backoff.
     pub(super) fn drop_session_and_schedule_reconnect(
         &mut self,
         account_idx: usize,
@@ -246,8 +216,8 @@ impl AppModel {
             return Task::none();
         };
         let label = acct.config.label.clone();
-        log::warn!("Dropping session for '{}' (reason: {})", label, reason);
-        acct.session = None;
+        log::warn!("Dropping client for '{}' (reason: {})", label, reason);
+        acct.client = None;
         acct.conn_state = super::ConnectionState::Error(format!("Session lost: {}", reason));
         acct.last_error = Some(format!("Session lost: {}", reason));
         let delay = acct.reconnect_backoff();
@@ -266,17 +236,17 @@ impl AppModel {
 
     /// Reconcile a folder's unread count from the actual messages in the list.
     /// Corrects sidebar badge drift after flag ops or server-side changes.
-    pub(super) fn reconcile_folder_unread_count(&mut self, account_id: &str, mailbox_hash: u64) {
+    pub(super) fn reconcile_folder_unread_count(&mut self, account_id: &str, mailbox_id: &str) {
         let unread = self
             .messages
             .iter()
-            .filter(|m| m.mailbox_hash == mailbox_hash && !m.is_read)
+            .filter(|m| m.mailbox_id == mailbox_id && !m.is_read)
             .count() as u32;
         if let Some(idx) = self.account_index(account_id) {
             if let Some(folder) = self.accounts[idx]
                 .folders
                 .iter_mut()
-                .find(|f| f.mailbox_hash == mailbox_hash)
+                .find(|f| f.mailbox_id == mailbox_id)
             {
                 if folder.unread_count != unread {
                     log::debug!(
@@ -328,17 +298,10 @@ impl AppModel {
                     self.setup_model = Some(SetupModel::for_edit(
                         id.clone(),
                         SetupFields {
-                            protocol: acct.config.capabilities.protocol,
                             label: acct.config.label.clone(),
-                            server: acct.config.imap_server.clone(),
-                            port: acct.config.imap_port.to_string(),
+                            jmap_url: acct.config.jmap_url.clone(),
                             username: acct.config.username.clone(),
                             email: acct.config.email_addresses.join(", "),
-                            starttls: acct.config.use_starttls,
-                            smtp_server: acct.config.smtp_overrides.server.clone().unwrap_or_default(),
-                            smtp_port: acct.config.smtp_overrides.port.map(|p| p.to_string()).unwrap_or_else(|| "587".into()),
-                            smtp_username: acct.config.smtp_overrides.username.clone().unwrap_or_default(),
-                            smtp_starttls: acct.config.smtp_overrides.use_starttls.unwrap_or(true),
                         },
                     ));
                     self.setup_password_visible = false;
@@ -364,13 +327,10 @@ impl AppModel {
             .map(|a| FileAccountConfig {
                 id: a.config.id.clone(),
                 label: a.config.label.clone(),
-                server: a.config.imap_server.clone(),
-                port: a.config.imap_port,
+                jmap_url: a.config.jmap_url.clone(),
                 username: a.config.username.clone(),
-                starttls: a.config.use_starttls,
-                password: PasswordBackend::Keyring,
+                auth_token: PasswordBackend::Keyring,
                 email_addresses: a.config.email_addresses.clone(),
-                smtp: a.config.smtp_overrides.clone(),
                 capabilities: a.config.capabilities.clone(),
             })
             .collect();
@@ -385,11 +345,13 @@ mod tests {
     use super::revalidated_selected_folder_index;
     use neverlight_mail_core::models::Folder;
 
-    fn folder(mailbox_hash: u64, name: &str) -> Folder {
+    fn folder(mailbox_id: &str, name: &str) -> Folder {
         Folder {
-            mailbox_hash,
+            mailbox_id: mailbox_id.to_string(),
             path: name.to_string(),
             name: name.to_string(),
+            role: None,
+            sort_order: 0,
             unread_count: 0,
             total_count: 0,
         }
@@ -397,28 +359,28 @@ mod tests {
 
     #[test]
     fn revalidation_keeps_selection_when_mailbox_still_exists() {
-        let folders = vec![folder(11, "INBOX"), folder(22, "Archive")];
-        let (idx, hash, evicted) = revalidated_selected_folder_index(Some(22), Some(0), &folders);
+        let folders = vec![folder("M11", "INBOX"), folder("M22", "Archive")];
+        let (idx, id, evicted) = revalidated_selected_folder_index(Some("M22"), Some(0), &folders);
         assert_eq!(idx, Some(1));
-        assert_eq!(hash, Some(22));
+        assert_eq!(id.as_deref(), Some("M22"));
         assert!(!evicted);
     }
 
     #[test]
     fn revalidation_evicts_selection_when_mailbox_missing() {
-        let folders = vec![folder(11, "INBOX"), folder(33, "Sent")];
-        let (idx, hash, evicted) = revalidated_selected_folder_index(Some(22), Some(0), &folders);
+        let folders = vec![folder("M11", "INBOX"), folder("M33", "Sent")];
+        let (idx, id, evicted) = revalidated_selected_folder_index(Some("M22"), Some(0), &folders);
         assert_eq!(idx, None);
-        assert_eq!(hash, None);
+        assert_eq!(id, None);
         assert!(evicted);
     }
 
     #[test]
-    fn revalidation_derives_hash_from_index_when_hash_not_set() {
-        let folders = vec![folder(11, "INBOX"), folder(22, "Archive")];
-        let (idx, hash, evicted) = revalidated_selected_folder_index(None, Some(1), &folders);
+    fn revalidation_derives_id_from_index_when_id_not_set() {
+        let folders = vec![folder("M11", "INBOX"), folder("M22", "Archive")];
+        let (idx, id, evicted) = revalidated_selected_folder_index(None, Some(1), &folders);
         assert_eq!(idx, Some(1));
-        assert_eq!(hash, Some(22));
+        assert_eq!(id.as_deref(), Some("M22"));
         assert!(!evicted);
     }
 }

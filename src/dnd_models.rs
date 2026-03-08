@@ -25,8 +25,8 @@ impl TryFrom<(Vec<u8>, String)> for DraggedFiles {
 #[derive(Debug, Clone)]
 pub struct DraggedMessage {
     pub source_account_id: String,
-    pub envelope_hash: u64,
-    pub source_mailbox: u64,
+    pub email_id: String,
+    pub source_mailbox_id: String,
 }
 
 const NEVERLIGHT_MAIL_MIME: &str = "application/x-neverlight-mail-message";
@@ -40,7 +40,7 @@ impl AsMimeTypes for DraggedMessage {
         if mime_type == NEVERLIGHT_MAIL_MIME {
             let s = format!(
                 "{}:{}:{}",
-                self.source_account_id, self.envelope_hash, self.source_mailbox
+                self.source_account_id, self.email_id, self.source_mailbox_id
             );
             Some(Cow::Owned(s.into_bytes()))
         } else {
@@ -60,17 +60,19 @@ impl TryFrom<(Vec<u8>, String)> for DraggedMessage {
     fn try_from((bytes, _mime): (Vec<u8>, String)) -> Result<Self, Self::Error> {
         let s = String::from_utf8(bytes).map_err(|e| e.to_string())?;
         let mut parts = s.splitn(3, ':');
-        let source_account_id = parts.next().ok_or("missing source_account_id")?;
-        let a = parts.next().ok_or("missing envelope_hash")?;
-        let b = parts.next().ok_or("missing source_mailbox")?;
+        let source_account_id = parts
+            .next()
+            .ok_or("missing source_account_id")?
+            .to_string();
+        let email_id = parts.next().ok_or("missing email_id")?.to_string();
+        let source_mailbox_id = parts
+            .next()
+            .ok_or("missing source_mailbox_id")?
+            .to_string();
         Ok(DraggedMessage {
-            source_account_id: source_account_id.to_string(),
-            envelope_hash: a
-                .parse()
-                .map_err(|e: std::num::ParseIntError| e.to_string())?,
-            source_mailbox: b
-                .parse()
-                .map_err(|e: std::num::ParseIntError| e.to_string())?,
+            source_account_id,
+            email_id,
+            source_mailbox_id,
         })
     }
 }
@@ -106,54 +108,38 @@ mod tests {
     fn dragged_message_roundtrip() {
         let msg = DraggedMessage {
             source_account_id: "acc-1".to_string(),
-            envelope_hash: 12345,
-            source_mailbox: 67890,
+            email_id: "M12345".to_string(),
+            source_mailbox_id: "mb-inbox".to_string(),
         };
 
         // Serialize
         let available = msg.available();
         assert_eq!(available.as_ref(), &[NEVERLIGHT_MAIL_MIME]);
         let bytes = msg.as_bytes(NEVERLIGHT_MAIL_MIME).unwrap();
-        assert_eq!(bytes.as_ref(), b"acc-1:12345:67890");
+        assert_eq!(bytes.as_ref(), b"acc-1:M12345:mb-inbox");
 
         // Deserialize
         let parsed =
             DraggedMessage::try_from((bytes.into_owned(), NEVERLIGHT_MAIL_MIME.into())).unwrap();
         assert_eq!(parsed.source_account_id, "acc-1");
-        assert_eq!(parsed.envelope_hash, 12345);
-        assert_eq!(parsed.source_mailbox, 67890);
+        assert_eq!(parsed.email_id, "M12345");
+        assert_eq!(parsed.source_mailbox_id, "mb-inbox");
     }
 
     #[test]
     fn dragged_message_as_bytes_wrong_mime() {
         let msg = DraggedMessage {
             source_account_id: "acc-1".to_string(),
-            envelope_hash: 1,
-            source_mailbox: 2,
+            email_id: "M1".to_string(),
+            source_mailbox_id: "mb-1".to_string(),
         };
         assert!(msg.as_bytes("text/plain").is_none());
     }
 
     #[test]
     fn dragged_message_try_from_missing_separator() {
-        let data = b"12345".to_vec();
+        let data = b"acc-only".to_vec();
         assert!(DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).is_err());
-    }
-
-    #[test]
-    fn dragged_message_try_from_non_numeric() {
-        let data = b"acc:abc:def".to_vec();
-        assert!(DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).is_err());
-    }
-
-    #[test]
-    fn dragged_message_try_from_large_values() {
-        let max = u64::MAX;
-        let data = format!("acc:{max}:{max}").into_bytes();
-        let parsed = DraggedMessage::try_from((data, NEVERLIGHT_MAIL_MIME.into())).unwrap();
-        assert_eq!(parsed.source_account_id, "acc");
-        assert_eq!(parsed.envelope_hash, max);
-        assert_eq!(parsed.source_mailbox, max);
     }
 
     #[test]

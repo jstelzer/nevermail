@@ -20,6 +20,7 @@ run:
     cargo run
 
 install: release
+    rm ~/.local/share/neverlight-mail/cache-*
     install -Dm755 target/release/neverlight-mail {{bin_dir}}/neverlight-mail
     install -Dm644 resources/{{app_id}}.desktop {{app_dir}}/{{app_id}}.desktop
     install -Dm644 resources/{{app_id}}.metainfo.xml {{metainfo_dir}}/{{app_id}}.metainfo.xml

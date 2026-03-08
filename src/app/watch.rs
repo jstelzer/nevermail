@@ -1,285 +1,54 @@
 use cosmic::app::Task;
-use futures::{SinkExt, StreamExt};
-use neverlight_mail_core::{BackendEvent, RefreshEventKind, Flag};
-use neverlight_mail_core::store;
+use futures::SinkExt;
+use neverlight_mail_core::client::JmapClient;
+use neverlight_mail_core::push::{self, EventSourceConfig};
 
-use super::{AppModel, ConnectionState, ImapWatchEvent, MailSession, Message, MessageIdentity};
+use super::{AppModel, ConnectionState, Message};
 
-pub(super) fn mail_watch_stream(
-    session: MailSession,
-) -> impl futures::Stream<Item = ImapWatchEvent> {
+/// Returns a stream that listens for JMAP EventSource (SSE) push notifications
+/// and maps state changes into app messages.
+pub(super) fn push_watch_stream(
+    client: JmapClient,
+    account_id: String,
+) -> impl futures::Stream<Item = Message> {
     cosmic::iced_futures::stream::channel(50, move |mut output| async move {
-        // Dispatch to the correct backend's watch stream.
-        // Both return impl Stream with the same Item type, so we handle
-        // them in separate branches that share the same event loop body.
-        macro_rules! run_watch {
-            ($stream:expr) => {
-                let mut stream = std::pin::pin!($stream);
-                while let Some(event) = stream.next().await {
-                    if let Some(evt) = map_backend_event(event) {
-                        let _ = output.send(evt).await;
-                    }
-                }
-            };
-        }
-
-        let watch_result: Result<(), String> = match &session {
-            MailSession::Imap(s) => match s.watch().await {
-                Ok(stream) => {
-                    run_watch!(stream);
-                    Ok(())
-                }
-                Err(e) => Err(e),
+        let aid = account_id.clone();
+        let mut sender = output.clone();
+        let result = push::listen(
+            &client,
+            &EventSourceConfig::default(),
+            move |_state_change| {
+                // Fire-and-forget send; the channel buffers up to 50
+                let _ = sender.try_send(Message::PushStateChanged(aid.clone()));
             },
-            MailSession::Jmap(s) => match s.watch().await {
-                Ok(stream) => {
-                    run_watch!(stream);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-        };
+        )
+        .await;
 
-        if let Err(e) = watch_result {
-            let _ = output.send(ImapWatchEvent::WatchError(e)).await;
+        match result {
+            Ok(()) => {
+                let _ = output.send(Message::PushEnded(account_id.clone())).await;
+            }
+            Err(e) => {
+                let _ = output
+                    .send(Message::PushError(account_id.clone(), e))
+                    .await;
+            }
         }
-
-        let _ = output.send(ImapWatchEvent::WatchEnded).await;
     })
-}
-
-/// Map a single backend event to an ImapWatchEvent (or None to skip).
-fn map_backend_event(
-    event: Result<BackendEvent, impl std::fmt::Display>,
-) -> Option<ImapWatchEvent> {
-    match event {
-        Ok(BackendEvent::Refresh(rev)) => match rev.kind {
-            RefreshEventKind::Create(envelope) => {
-                let from = envelope
-                    .from()
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Some(ImapWatchEvent::NewMessage {
-                    mailbox_hash: rev.mailbox_hash.0,
-                    envelope_hash: envelope.hash().0,
-                    subject: envelope.subject().to_string(),
-                    from,
-                })
-            }
-            RefreshEventKind::Remove(envelope_hash) => Some(ImapWatchEvent::MessageRemoved {
-                mailbox_hash: rev.mailbox_hash.0,
-                envelope_hash: envelope_hash.0,
-            }),
-            RefreshEventKind::NewFlags(envelope_hash, (flag, _tags)) => {
-                let is_read = flag.contains(Flag::SEEN);
-                let is_starred = flag.contains(Flag::FLAGGED);
-                let flags = store::flags_to_u8(is_read, is_starred);
-                Some(ImapWatchEvent::FlagsChanged {
-                    mailbox_hash: rev.mailbox_hash.0,
-                    envelope_hash: envelope_hash.0,
-                    flags,
-                })
-            }
-            RefreshEventKind::Rescan => Some(ImapWatchEvent::Rescan),
-            other => {
-                log::debug!("Unhandled watch event kind: {:?}", other);
-                None
-            }
-        },
-        Ok(_) => None,
-        Err(e) => Some(ImapWatchEvent::WatchError(e.to_string())),
-    }
 }
 
 impl AppModel {
     pub(super) fn handle_watch(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::ImapEvent(ref account_id, ImapWatchEvent::NewMessage {
-                mailbox_hash,
-                envelope_hash,
-                subject,
-                from,
-            }) => {
-                let identity = MessageIdentity {
-                    account_id: account_id.clone(),
-                    mailbox_hash,
-                    envelope_hash,
-                };
-                // Dedup: melib can emit multiple Create events for the same envelope
-                if !self.notified_envelopes.insert(identity) {
-                    log::debug!("Skipping duplicate notification for envelope {}", envelope_hash);
-                    return Task::none();
-                }
-
-                let notif_task = cosmic::task::future(async move {
-                    let subj = subject;
-                    let f = from;
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = notify_rust::Notification::new()
-                            .summary(&format!("From: {}", f))
-                            .body(&subj)
-                            .icon("mail-message-new")
-                            .timeout(5000)
-                            .show();
-                    })
-                    .await;
-                    Message::Noop
-                });
-
-                // If viewing a folder from this account that matches the mailbox, refresh
-                if let Some(acct_idx) = self.active_account {
-                    if let Some(fi) = self.selected_folder {
-                        if let Some(folder) = self.accounts.get(acct_idx).and_then(|a| a.folders.get(fi)) {
-                            if folder.mailbox_hash == mailbox_hash
-                                && self.accounts[acct_idx].config.id == *account_id
-                            {
-                                let refresh_task = self.dispatch(Message::Refresh);
-                                return cosmic::task::batch(vec![notif_task, refresh_task]);
-                            }
-                        }
-                    }
-                }
-                return notif_task;
-            }
-            Message::ImapEvent(account_id, ImapWatchEvent::MessageRemoved {
-                mailbox_hash,
-                envelope_hash,
-            }) => {
-                // Only act if we're viewing the affected mailbox
-                let viewing_mailbox = self.active_account
-                    .and_then(|ai| {
-                        self.selected_folder.and_then(|fi| {
-                            self.accounts.get(ai).and_then(|a| a.folders.get(fi))
-                        })
-                    })
-                    .is_some_and(|f| {
-                        f.mailbox_hash == mailbox_hash
-                            && self
-                                .active_account
-                                .and_then(|i| self.accounts.get(i))
-                                .is_some_and(|a| a.config.id == account_id)
-                    });
-
-                if viewing_mailbox {
-                    // Find and remove from messages list
-                    if let Some(pos) = self.messages.iter().position(|m| m.envelope_hash == envelope_hash) {
-                        self.messages.remove(pos);
-
-                        // Adjust selection
-                        match self.selected_message {
-                            Some(sel) if sel == pos => {
-                                // Selected message was removed — clear preview
-                                self.selected_message = if self.messages.is_empty() {
-                                    None
-                                } else {
-                                    Some(sel.min(self.messages.len() - 1))
-                                };
-                                self.preview_body.clear();
-                                self.preview_markdown.clear();
-                                self.preview_attachments.clear();
-                                self.preview_image_handles.clear();
-                            }
-                            Some(sel) if sel > pos => {
-                                self.selected_message = Some(sel - 1);
-                            }
-                            _ => {}
-                        }
-
-                        self.recompute_visible();
-                    }
-
-                    // Fire-and-forget cache cleanup
-                    if let Some(cache) = &self.cache {
-                        let cache = cache.clone();
-                        let Some(account_idx) =
-                            self.account_for_account_mailbox(&account_id, mailbox_hash)
-                        else {
-                            let err = format!(
-                                "Cannot remove cache message: no account for mailbox {}",
-                                mailbox_hash
-                            );
-                            log::error!("{}", err);
-                            self.status_message = err;
-                            return Task::none();
-                        };
-                        let account_id = self.accounts[account_idx].config.id.clone();
-                        return cosmic::task::future(async move {
-                            if let Err(e) = cache.remove_message(account_id, envelope_hash).await {
-                                log::warn!("Failed to remove message from cache: {}", e);
-                            }
-                            Message::Noop
-                        });
-                    }
-                }
-            }
-
-            Message::ImapEvent(account_id, ImapWatchEvent::FlagsChanged {
-                mailbox_hash,
-                envelope_hash,
-                flags,
-            }) => {
-                let viewing_mailbox = self.active_account
-                    .and_then(|ai| {
-                        self.selected_folder.and_then(|fi| {
-                            self.accounts.get(ai).and_then(|a| a.folders.get(fi))
-                        })
-                    })
-                    .is_some_and(|f| {
-                        f.mailbox_hash == mailbox_hash
-                            && self
-                                .active_account
-                                .and_then(|i| self.accounts.get(i))
-                                .is_some_and(|a| a.config.id == account_id)
-                    });
-
-                if viewing_mailbox {
-                    let (is_read, is_starred) = store::flags_from_u8(flags);
-                    if let Some(msg) = self.messages.iter_mut()
-                        .find(|m| m.envelope_hash == envelope_hash)
-                    {
-                        msg.is_read = is_read;
-                        msg.is_starred = is_starred;
-                    }
-
-                    // Sync server flags and clear any pending op in cache
-                    if let Some(cache) = &self.cache {
-                        let cache = cache.clone();
-                        let Some(account_idx) =
-                            self.account_for_account_mailbox(&account_id, mailbox_hash)
-                        else {
-                            let err = format!(
-                                "Cannot sync cache flags: no account for mailbox {}",
-                                mailbox_hash
-                            );
-                            log::error!("{}", err);
-                            self.status_message = err;
-                            return Task::none();
-                        };
-                        let account_id = self.accounts[account_idx].config.id.clone();
-                        return cosmic::task::future(async move {
-                            if let Err(e) =
-                                cache.clear_pending_op(account_id, envelope_hash, flags).await
-                            {
-                                log::warn!("Failed to sync flags in cache: {}", e);
-                            }
-                            Message::Noop
-                        });
-                    }
-                }
-            }
-
-            Message::ImapEvent(_, ImapWatchEvent::Rescan) => {
+            Message::PushStateChanged(ref account_id) => {
+                log::debug!("Push state change for account {}", account_id);
                 return self.dispatch(Message::Refresh);
             }
 
-            Message::ImapEvent(ref account_id, ImapWatchEvent::WatchError(ref e)) => {
-                log::warn!("Watch error for account: {}", e);
+            Message::PushError(ref account_id, ref error) => {
+                log::warn!("Push error for account {}: {}", account_id, error);
                 if let Some(idx) = self.account_index(account_id) {
-                    self.accounts[idx].conn_state = ConnectionState::Error(e.clone());
-                    self.accounts[idx].last_error = Some(e.clone());
-                    self.accounts[idx].session = None;
+                    self.accounts[idx].last_error = Some(error.clone());
                     let aid = account_id.clone();
                     return cosmic::task::future(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -287,12 +56,13 @@ impl AppModel {
                     });
                 }
             }
-            Message::ImapEvent(ref account_id, ImapWatchEvent::WatchEnded) => {
-                log::info!("Watch stream ended for account");
+
+            Message::PushEnded(ref account_id) => {
+                log::info!("Push stream ended for account {}", account_id);
                 if let Some(idx) = self.account_index(account_id) {
-                    self.accounts[idx].conn_state = ConnectionState::Error("Connection lost".into());
-                    self.accounts[idx].last_error = Some("Connection lost".into());
-                    self.accounts[idx].session = None;
+                    self.accounts[idx].conn_state =
+                        ConnectionState::Error("Push stream ended".into());
+                    self.accounts[idx].last_error = Some("Push stream ended".into());
                     let aid = account_id.clone();
                     return cosmic::task::future(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;

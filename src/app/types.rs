@@ -1,16 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Instant;
 
 use cosmic::app::Core;
 use cosmic::widget::{image, markdown, pane_grid, text_editor};
 use futures::future::AbortHandle;
 
+use neverlight_mail_core::client::JmapClient;
 use neverlight_mail_core::config::{AccountConfig, AccountId};
-use neverlight_mail_core::imap::ImapSession;
-use neverlight_mail_core::jmap::JmapSession;
 use neverlight_mail_core::models::{AttachmentData, Folder, MessageSummary};
-use neverlight_mail_core::{EnvelopeHash, FlagOp, MailboxHash};
 use neverlight_mail_core::setup::SetupModel;
 use neverlight_mail_core::store::CacheHandle;
 
@@ -60,8 +57,8 @@ pub struct RecoverableActionError {
     pub action: ActionKind,
     pub message: String,
     pub retry: RetryAction,
-    pub envelope_hash: Option<u64>,
-    pub mailbox_hash: Option<u64>,
+    pub email_id: Option<String>,
+    pub mailbox_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,14 +76,14 @@ pub enum FlagIntentKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MailboxIdentity {
     pub account_id: AccountId,
-    pub mailbox_hash: u64,
+    pub mailbox_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageIdentity {
     pub account_id: AccountId,
-    pub mailbox_hash: u64,
-    pub envelope_hash: u64,
+    pub mailbox_id: String,
+    pub email_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,87 +100,16 @@ pub struct PendingMoveIntent {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol-agnostic session wrapper
-// ---------------------------------------------------------------------------
-
-/// Wraps either an IMAP or JMAP session behind a uniform interface.
-/// All dispatch sites use this instead of reaching for ImapSession directly.
-#[derive(Clone, Debug)]
-pub enum MailSession {
-    Imap(Arc<ImapSession>),
-    Jmap(Arc<JmapSession>),
-}
-
-impl MailSession {
-    pub async fn fetch_folders(&self) -> Result<Vec<Folder>, String> {
-        match self {
-            Self::Imap(s) => s.fetch_folders().await,
-            Self::Jmap(s) => s.fetch_folders().await,
-        }
-    }
-
-    pub async fn fetch_messages(
-        &self,
-        mailbox_hash: MailboxHash,
-    ) -> Result<Vec<MessageSummary>, String> {
-        match self {
-            Self::Imap(s) => s.fetch_messages(mailbox_hash).await,
-            Self::Jmap(s) => s.fetch_messages(mailbox_hash).await,
-        }
-    }
-
-    pub async fn set_flags(
-        &self,
-        envelope_hash: EnvelopeHash,
-        mailbox_hash: MailboxHash,
-        flags: Vec<FlagOp>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Imap(s) => s.set_flags(envelope_hash, mailbox_hash, flags).await,
-            Self::Jmap(s) => s.set_flags(envelope_hash, mailbox_hash, flags).await,
-        }
-    }
-
-    pub async fn move_messages(
-        &self,
-        envelope_hash: EnvelopeHash,
-        source_mailbox_hash: MailboxHash,
-        destination_mailbox_hash: MailboxHash,
-    ) -> Result<(), String> {
-        match self {
-            Self::Imap(s) => {
-                s.move_messages(envelope_hash, source_mailbox_hash, destination_mailbox_hash)
-                    .await
-            }
-            Self::Jmap(s) => {
-                s.move_messages(envelope_hash, source_mailbox_hash, destination_mailbox_hash)
-                    .await
-            }
-        }
-    }
-
-    pub async fn fetch_body(
-        &self,
-        envelope_hash: EnvelopeHash,
-    ) -> Result<(String, String, Vec<AttachmentData>), String> {
-        match self {
-            Self::Imap(s) => s.fetch_body(envelope_hash).await,
-            Self::Jmap(s) => s.fetch_body(envelope_hash).await,
-        }
-    }
-
-}
-
-// ---------------------------------------------------------------------------
 // Per-account state
 // ---------------------------------------------------------------------------
 
 pub struct AccountState {
     pub config: AccountConfig,
-    pub session: Option<MailSession>,
+    pub client: Option<JmapClient>,
     pub conn_state: ConnectionState,
     pub folders: Vec<Folder>,
-    pub folder_map: HashMap<String, u64>,
+    /// Maps mailbox path → JMAP mailbox ID.
+    pub folder_map: HashMap<String, String>,
     pub collapsed: bool,
     /// Consecutive reconnect failures (reset on success).
     pub reconnect_attempts: u32,
@@ -195,7 +121,7 @@ impl AccountState {
     pub fn new(config: AccountConfig) -> Self {
         AccountState {
             config,
-            session: None,
+            client: None,
             conn_state: ConnectionState::Disconnected,
             folders: Vec::new(),
             folder_map: HashMap::new(),
@@ -219,7 +145,8 @@ impl AccountState {
     pub fn rebuild_folder_map(&mut self) {
         self.folder_map.clear();
         for f in &self.folders {
-            self.folder_map.insert(f.path.clone(), f.mailbox_hash);
+            self.folder_map
+                .insert(f.path.clone(), f.mailbox_id.clone());
         }
     }
 }
@@ -238,7 +165,7 @@ pub struct AppModel {
     pub(super) cache: Option<CacheHandle>,
 
     pub(super) selected_folder: Option<usize>,
-    pub(super) selected_mailbox_hash: Option<u64>,
+    pub(super) selected_mailbox_id: Option<String>,
     pub(super) selected_folder_evicted: bool,
 
     pub(super) messages: Vec<MessageSummary>,
@@ -252,11 +179,11 @@ pub struct AppModel {
     pub(super) preview_image_handles: Vec<Option<image::Handle>>,
 
     /// Thread IDs that are currently collapsed (children hidden)
-    pub(super) collapsed_threads: HashSet<u64>,
+    pub(super) collapsed_threads: HashSet<String>,
     /// Maps visible row positions → real indices into `messages`
     pub(super) visible_indices: Vec<usize>,
     /// Total messages per thread_id (for collapse indicators)
-    pub(super) thread_sizes: HashMap<u64, usize>,
+    pub(super) thread_sizes: HashMap<String, usize>,
     /// Snapshot of optimistically removed messages for move rollback.
     pub(super) pending_move_restore: HashMap<MessageIdentity, (MessageSummary, usize)>,
     /// Latest flag operation epoch per envelope (stale completions are dropped).
@@ -290,8 +217,8 @@ pub struct AppModel {
     pub(super) flag_in_flight_accounts: HashSet<AccountId>,
     pub(super) pending_move_intents: HashMap<AccountId, PendingMoveIntent>,
     pub(super) pending_flag_intents: HashMap<AccountId, PendingFlagIntent>,
-    /// Recently notified messages (dedup watch Create events).
-    pub(super) notified_envelopes: HashSet<MessageIdentity>,
+    /// Recently notified messages (dedup push events).
+    pub(super) notified_messages: HashSet<MessageIdentity>,
     /// Diagnostics counters.
     pub(super) stale_apply_drop_count: u64,
     pub(super) toc_drift_count: u64,
@@ -302,13 +229,6 @@ pub struct AppModel {
     /// Timing for diagnostics.
     pub(super) last_sync_at: Option<Instant>,
     pub(super) last_refresh_at: Option<Instant>,
-
-    /// SMTP diagnostics.
-    pub(super) smtp_send_count: u64,
-    pub(super) smtp_fail_count: u64,
-    pub(super) smtp_last_error: Option<String>,
-    pub(super) smtp_last_attempt_at: Option<Instant>,
-    pub(super) smtp_last_server: Option<String>,
 
     // Search state
     pub(super) search_active: bool,
@@ -341,7 +261,7 @@ pub struct AppModel {
     // DnD state
     pub(super) folder_drag_target: Option<usize>,
 
-    /// Body view deferred until IMAP session is ready
+    /// Body view deferred until connection is ready
     pub(super) pending_body: Option<usize>,
     /// Retry count for deferred body fetches (prevents infinite loops)
     pub(super) body_defer_retries: u8,
@@ -352,25 +272,24 @@ pub struct AppModel {
     // Pane layout
     pub(super) panes: pane_grid::State<PaneKind>,
     pub(super) diagnostics_collapsed: bool,
-    pub(super) smtp_diagnostics_collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     AccountConnected {
         account_id: AccountId,
-        result: Result<MailSession, String>,
+        result: Result<JmapClient, String>,
     },
 
     SelectFolder(usize, usize), // (account_idx, folder_idx)
 
     ViewBody(usize),
     BodyDeferred {
-        envelope_hash: u64,
+        email_id: String,
         epoch: u64,
     },
     BodyLoaded {
-        envelope_hash: u64,
+        email_id: String,
         epoch: u64,
         result: Result<(String, String, Vec<AttachmentData>), String>,
     },
@@ -387,7 +306,7 @@ pub enum Message {
     },
     CachedMessagesLoaded {
         account_id: AccountId,
-        mailbox_hash: u64,
+        mailbox_id: String,
         offset: u32,
         epoch: u64,
         result: Result<Vec<MessageSummary>, String>,
@@ -399,7 +318,7 @@ pub enum Message {
     },
     SyncMessagesComplete {
         account_id: AccountId,
-        mailbox_hash: u64,
+        mailbox_id: String,
         epoch: u64,
         result: Result<(), String>,
     },
@@ -425,13 +344,6 @@ pub enum Message {
         epoch: u64,
         result: Result<(), String>,
     },
-    MovePostconditionChecked {
-        message: MessageIdentity,
-        source: MailboxIdentity,
-        epoch: u64,
-        result: Result<bool, String>,
-    },
-
     // Keyboard navigation
     SelectionUp,
     SelectionDown,
@@ -459,7 +371,11 @@ pub enum Message {
     ComposeCancel,
     SendComplete(Result<(), String>),
 
-    ImapEvent(AccountId, ImapWatchEvent),
+    /// EventSource push: server state changed, trigger delta sync.
+    PushStateChanged(AccountId),
+    /// EventSource stream ended or errored — schedule reconnect.
+    PushError(AccountId, String),
+    PushEnded(AccountId),
 
     // Search
     SearchActivate,
@@ -483,10 +399,9 @@ pub enum Message {
 
     PaneResized(pane_grid::ResizeEvent),
     ToggleDiagnostics,
-    ToggleSmtpDiagnostics,
 
     /// Auto-mark-read: fires 5s after a message is displayed
-    AutoMarkRead(u64),
+    AutoMarkRead(String),
 
     ForceReconnect(AccountId),
     Refresh,
@@ -500,43 +415,13 @@ pub enum Message {
     CancelDeleteAccount,
     ToggleAccountCollapse(usize),
 
-    // Setup dialog messages
-    SetupProtocolChanged(usize),
+    // Setup dialog messages (JMAP-only: 5 fields)
     SetupLabelChanged(String),
-    SetupServerChanged(String),
-    SetupPortChanged(String),
+    SetupJmapUrlChanged(String),
     SetupUsernameChanged(String),
-    SetupPasswordChanged(String),
-    SetupStarttlsToggled(bool),
-    SetupPasswordVisibilityToggled,
+    SetupTokenChanged(String),
     SetupEmailAddressesChanged(String),
-    SetupSmtpServerChanged(String),
-    SetupSmtpPortChanged(String),
-    SetupSmtpUsernameChanged(String),
-    SetupSmtpPasswordChanged(String),
-    SetupSmtpStarttlsToggled(bool),
+    SetupPasswordVisibilityToggled,
     SetupSubmit,
     SetupCancel,
-}
-
-#[derive(Debug, Clone)]
-pub enum ImapWatchEvent {
-    NewMessage {
-        mailbox_hash: u64,
-        envelope_hash: u64,
-        subject: String,
-        from: String,
-    },
-    MessageRemoved {
-        mailbox_hash: u64,
-        envelope_hash: u64,
-    },
-    FlagsChanged {
-        mailbox_hash: u64,
-        envelope_hash: u64,
-        flags: u8,
-    },
-    Rescan,
-    WatchError(String),
-    WatchEnded,
 }

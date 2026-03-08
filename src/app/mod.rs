@@ -21,42 +21,24 @@ use cosmic::widget;
 use cosmic::widget::{pane_grid, text_editor};
 use cosmic::Element;
 
-use neverlight_mail_core::config::{AccountConfig, ConfigNeedsInput, LayoutConfig, Protocol};
-use neverlight_mail_core::imap::ImapSession;
-use neverlight_mail_core::jmap::JmapSession;
+use neverlight_mail_core::config::{AccountConfig, ConfigNeedsInput, LayoutConfig};
+use neverlight_mail_core::session::JmapSession;
 use neverlight_mail_core::setup::SetupModel;
 use neverlight_mail_core::store::CacheHandle;
 
 use crate::dnd_models::DraggedFiles;
 use crate::ui::compose_dialog::ComposeMode;
 
-/// Connect to an account using the protocol declared in its config.
+/// Connect to an account via JMAP session discovery.
 fn connect_account(config: AccountConfig, account_id: String) -> Task<Message> {
-    let protocol = config.protocol();
     let label = config.label.clone();
-    log::info!("[{}] Connecting via {:?} (account={})", label, protocol, account_id);
+    log::info!("[{}] Connecting via JMAP (account={})", label, account_id);
     cosmic::task::future(async move {
-        let result = match protocol {
-            Protocol::Imap => {
-                let imap_config = config.to_imap_config();
-                ImapSession::connect(imap_config).await.map(MailSession::Imap)
-            }
-            Protocol::Jmap => {
-                let session_url = config
-                    .capabilities
-                    .jmap_session_url
-                    .clone()
-                    .unwrap_or_else(|| {
-                        format!("https://{}/.well-known/jmap", config.imap_server)
-                    });
-                log::info!("[{}] JMAP session URL: {}", label, session_url);
-                JmapSession::connect(&config, &session_url)
-                    .await
-                    .map(MailSession::Jmap)
-            }
-        };
+        let result = JmapSession::connect(&config)
+            .await
+            .map(|(_session, client)| client);
         if let Err(ref e) = result {
-            log::error!("[{}] {:?} connect failed: {}", label, protocol, e);
+            log::error!("[{}] JMAP connect failed: {}", label, e);
         }
         Message::AccountConnected {
             account_id,
@@ -113,7 +95,7 @@ impl cosmic::Application for AppModel {
             active_account: None,
             cache: cache.clone(),
             selected_folder: None,
-            selected_mailbox_hash: None,
+            selected_mailbox_id: None,
             selected_folder_evicted: false,
             messages: Vec::new(),
             selected_message: None,
@@ -152,7 +134,7 @@ impl cosmic::Application for AppModel {
             flag_in_flight_accounts: HashSet::new(),
             pending_move_intents: HashMap::new(),
             pending_flag_intents: HashMap::new(),
-            notified_envelopes: HashSet::new(),
+            notified_messages: HashSet::new(),
             stale_apply_drop_count: 0,
             toc_drift_count: 0,
             postcondition_failure_count: 0,
@@ -161,12 +143,6 @@ impl cosmic::Application for AppModel {
             reconnect_count: 0,
             last_sync_at: None,
             last_refresh_at: None,
-
-            smtp_send_count: 0,
-            smtp_fail_count: 0,
-            smtp_last_error: None,
-            smtp_last_attempt_at: None,
-            smtp_last_server: None,
 
             search_active: false,
             search_query: String::new(),
@@ -199,14 +175,13 @@ impl cosmic::Application for AppModel {
 
             panes,
             diagnostics_collapsed: true,
-            smtp_diagnostics_collapsed: true,
         };
 
         let title_task = app.set_window_title("Nevermail".into());
         let mut tasks = vec![title_task];
 
         // Resolve config: env → file+keyring → show dialog
-        match neverlight_mail_core::config::Config::resolve_all_accounts() {
+        match neverlight_mail_core::config::resolve_all_accounts() {
             Ok(account_configs) => {
                 for ac in account_configs {
                     let account_id = ac.id.clone();
@@ -219,23 +194,27 @@ impl cosmic::Application for AppModel {
                         let aid = account_id.clone();
                         tasks.push(cosmic::task::future(async move {
                             let result = cache.load_folders(aid.clone()).await;
-                            Message::CachedFoldersLoaded { account_id: aid, result }
+                            Message::CachedFoldersLoaded {
+                                account_id: aid,
+                                result,
+                            }
                         }));
                     }
 
-                    // Start connecting — dispatch by protocol
+                    // Start connecting
                     let aid = account_id.clone();
                     tasks.push(connect_account(ac, aid));
                 }
                 if app.accounts.is_empty() {
-                    app.setup_model = Some(SetupModel::from_config_needs(&ConfigNeedsInput::FullSetup));
+                    app.setup_model =
+                        Some(SetupModel::from_config_needs(&ConfigNeedsInput::FullSetup));
                     app.status_message = "Setup required — enter your account details".into();
                 }
             }
             Err(ref needs) => {
                 let status = match needs {
                     ConfigNeedsInput::FullSetup => "Setup required — enter your account details",
-                    ConfigNeedsInput::PasswordOnly { .. } => "Password required",
+                    ConfigNeedsInput::TokenOnly { .. } => "API token required",
                 };
                 app.setup_model = Some(SetupModel::from_config_needs(needs));
                 app.status_message = status.into();
@@ -296,100 +275,106 @@ impl cosmic::Application for AppModel {
 
         if self.search_focused {
             // When search input has focus, only intercept Escape.
-            // All other keys must reach the text_input widget unimpeded.
-            subs.push(cosmic::iced_futures::event::listen_raw(|event, status, _| {
-                if cosmic::iced_core::event::Status::Ignored != status {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(keyboard::Event::KeyPressed {
-                        key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                        ..
-                    }) => Some(Message::SearchClear),
-                    _ => None,
-                }
-            }));
+            subs.push(cosmic::iced_futures::event::listen_raw(
+                |event, status, _| {
+                    if cosmic::iced_core::event::Status::Ignored != status {
+                        return None;
+                    }
+                    match event {
+                        Event::Keyboard(keyboard::Event::KeyPressed {
+                            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                            ..
+                        }) => Some(Message::SearchClear),
+                        _ => None,
+                    }
+                },
+            ));
         } else {
             // Full keyboard shortcuts when not typing in search
-            subs.push(cosmic::iced_futures::event::listen_raw(|event, status, _| {
-                if cosmic::iced_core::event::Status::Ignored != status {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(keyboard::Event::KeyPressed {
-                        key, modifiers, ..
-                    }) => match key {
-                        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                            Some(Message::SelectionDown)
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                            Some(Message::SelectionUp)
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                            Some(Message::ActivateSelection)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "/" && !modifiers.control() =>
-                        {
-                            Some(Message::SearchActivate)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "j" && !modifiers.control() =>
-                        {
-                            Some(Message::SelectionDown)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "k" && !modifiers.control() =>
-                        {
-                            Some(Message::SelectionUp)
-                        }
-                        keyboard::Key::Character(ref c) if c.as_str() == " " => {
-                            Some(Message::ToggleThreadCollapse)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "c" && !modifiers.control() =>
-                        {
-                            Some(Message::ComposeNew)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "r" && !modifiers.control() =>
-                        {
-                            Some(Message::ComposeReply)
-                        }
-                        keyboard::Key::Character(ref c)
-                            if c.as_str() == "f" && !modifiers.control() =>
-                        {
-                            Some(Message::ComposeForward)
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                            Some(Message::SearchClear)
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::F5) => {
-                            Some(Message::Refresh)
-                        }
+            subs.push(cosmic::iced_futures::event::listen_raw(
+                |event, status, _| {
+                    if cosmic::iced_core::event::Status::Ignored != status {
+                        return None;
+                    }
+                    match event {
+                        Event::Keyboard(keyboard::Event::KeyPressed {
+                            key, modifiers, ..
+                        }) => match key {
+                            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                                Some(Message::SelectionDown)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                                Some(Message::SelectionUp)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::Enter) => {
+                                Some(Message::ActivateSelection)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "/" && !modifiers.control() =>
+                            {
+                                Some(Message::SearchActivate)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "j" && !modifiers.control() =>
+                            {
+                                Some(Message::SelectionDown)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "k" && !modifiers.control() =>
+                            {
+                                Some(Message::SelectionUp)
+                            }
+                            keyboard::Key::Character(ref c) if c.as_str() == " " => {
+                                Some(Message::ToggleThreadCollapse)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "c" && !modifiers.control() =>
+                            {
+                                Some(Message::ComposeNew)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "r" && !modifiers.control() =>
+                            {
+                                Some(Message::ComposeReply)
+                            }
+                            keyboard::Key::Character(ref c)
+                                if c.as_str() == "f" && !modifiers.control() =>
+                            {
+                                Some(Message::ComposeForward)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                                Some(Message::SearchClear)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::F5) => {
+                                Some(Message::Refresh)
+                            }
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
-                }
-            }));
+                    }
+                },
+            ));
         }
 
-        // Per-account watch streams (IMAP IDLE or JMAP poll)
+        // Per-account EventSource push streams
         for (i, acct) in self.accounts.iter().enumerate() {
-            if let Some(session) = &acct.session {
-                let session = session.clone();
+            if let Some(client) = &acct.client {
+                let client = client.clone();
                 let account_id = acct.config.id.clone();
-                let sub_id = format!("mail-watch-{}", i);
+                let sub_id = format!("push-watch-{}", i);
                 subs.push(
-                    Subscription::run_with_id(sub_id, watch::mail_watch_stream(session))
-                        .map(move |evt| Message::ImapEvent(account_id.clone(), evt)),
+                    Subscription::run_with_id(
+                        sub_id,
+                        watch::push_watch_stream(client, account_id.clone()),
+                    )
+                    .map(move |msg| msg),
                 );
             }
         }
 
-        // Periodic full sync (any connected account)
-        let has_any_session = self.accounts.iter().any(|a| a.session.is_some());
-        if has_any_session {
+        // Periodic full sync fallback (5 minutes)
+        let has_any_client = self.accounts.iter().any(|a| a.client.is_some());
+        if has_any_client {
             subs.push(Subscription::run_with_id(
                 "periodic-sync",
                 cosmic::iced_futures::stream::channel(1, |mut output| async move {
@@ -432,15 +417,6 @@ impl cosmic::Application for AppModel {
                         last_refresh_at: self.last_refresh_at,
                         refresh_in_flight: self.refresh_in_flight,
                     },
-                    crate::ui::sidebar::SmtpDiagnosticsState {
-                        collapsed: self.smtp_diagnostics_collapsed,
-                        send_count: self.smtp_send_count,
-                        fail_count: self.smtp_fail_count,
-                        last_error: self.smtp_last_error.as_deref(),
-                        last_attempt_at: self.smtp_last_attempt_at,
-                        last_server: self.smtp_last_server.as_deref(),
-                        in_flight: self.is_sending,
-                    },
                 ),
                 PaneKind::MessageList => crate::ui::message_list::view(
                     crate::ui::message_list::MessageListState {
@@ -455,9 +431,9 @@ impl cosmic::Application for AppModel {
                     },
                 ),
                 PaneKind::MessageView => {
-                    let selected_msg = self.selected_message.and_then(|i| {
-                        self.messages.get(i).map(|msg| (i, msg))
-                    });
+                    let selected_msg = self
+                        .selected_message
+                        .and_then(|i| self.messages.get(i).map(|msg| (i, msg)));
                     crate::ui::message_view::view(
                         &self.preview_markdown,
                         selected_msg,
@@ -486,10 +462,6 @@ impl cosmic::Application for AppModel {
         // register drag_destinations with the Wayland compositor — dnd_destination
         // widgets inside dialogs are invisible to the compositor and drops silently
         // fail (files snap back to file manager). This must live in view().
-        //
-        // Two codepaths:
-        //   on_file_transfer → portal key → ashpd resolve → paths (Wayland native)
-        //   on_finish         → text/uri-list → url parse   → paths (X11 fallback)
         widget::dnd_destination::dnd_destination_for_data::<DraggedFiles, _>(
             content,
             |data, _action| match data {
@@ -527,20 +499,12 @@ impl cosmic::Application for AppModel {
             | Message::SendComplete(_) => self.handle_compose(message),
 
             // Setup
-            Message::SetupProtocolChanged(_)
-            | Message::SetupLabelChanged(_)
-            | Message::SetupServerChanged(_)
-            | Message::SetupPortChanged(_)
+            Message::SetupLabelChanged(_)
+            | Message::SetupJmapUrlChanged(_)
             | Message::SetupUsernameChanged(_)
-            | Message::SetupPasswordChanged(_)
-            | Message::SetupStarttlsToggled(_)
+            | Message::SetupTokenChanged(_)
             | Message::SetupPasswordVisibilityToggled
             | Message::SetupEmailAddressesChanged(_)
-            | Message::SetupSmtpServerChanged(_)
-            | Message::SetupSmtpPortChanged(_)
-            | Message::SetupSmtpUsernameChanged(_)
-            | Message::SetupSmtpPasswordChanged(_)
-            | Message::SetupSmtpStarttlsToggled(_)
             | Message::SetupSubmit
             | Message::SetupCancel => self.handle_setup(message),
 
@@ -586,7 +550,7 @@ impl cosmic::Application for AppModel {
             | Message::FolderDragLeave
             | Message::FlagOpComplete { .. }
             | Message::MoveOpComplete { .. }
-            | Message::MovePostconditionChecked { .. } => self.handle_actions(message),
+            => self.handle_actions(message),
 
             // Keyboard navigation
             Message::SelectionUp
@@ -601,8 +565,10 @@ impl cosmic::Application for AppModel {
             | Message::SearchResultsLoaded { .. }
             | Message::SearchClear => self.handle_search(message),
 
-            // IMAP watch events
-            Message::ImapEvent(_, _) => self.handle_watch(message),
+            // EventSource push events
+            Message::PushStateChanged(_)
+            | Message::PushError(_, _)
+            | Message::PushEnded(_) => self.handle_watch(message),
 
             // Pane layout
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -612,10 +578,6 @@ impl cosmic::Application for AppModel {
             }
             Message::ToggleDiagnostics => {
                 self.diagnostics_collapsed = !self.diagnostics_collapsed;
-                Task::none()
-            }
-            Message::ToggleSmtpDiagnostics => {
-                self.smtp_diagnostics_collapsed = !self.smtp_diagnostics_collapsed;
                 Task::none()
             }
             Message::Noop => Task::none(),

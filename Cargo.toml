@@ -6,8 +6,8 @@ license = "GPL-3.0-or-later"
 description = "A COSMIC desktop email client"
 
 [dependencies]
-# Core email engine
-neverlight-mail-core = { version = "0.0.6" }
+# Core email engine (JMAP-native)
+neverlight-mail-core = { path = "../neverlight-mail-core" }
 
 # COSMIC UI framework
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
@@ -41,4 +41,3 @@ ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 
 # Desktop notifications
 notify-rust = "4"
-

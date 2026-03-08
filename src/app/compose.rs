@@ -1,17 +1,13 @@
-use std::time::Instant;
-
 use cosmic::app::Task;
 use cosmic::dialog::file_chooser;
 use cosmic::widget::text_editor;
 
 use super::{AppModel, Message};
 use neverlight_mail_core::models::AttachmentData;
-use neverlight_mail_core::smtp::{self, OutgoingEmail};
+use neverlight_mail_core::submit::{self, SendRequest};
 
 use crate::dnd_models::DraggedFiles;
 use crate::ui::compose_dialog::ComposeMode;
-
-const SMTP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Guess MIME type from file extension.
 fn mime_from_ext(path: &std::path::Path) -> &'static str {
@@ -37,9 +33,13 @@ fn mime_from_ext(path: &std::path::Path) -> &'static str {
         Some("json") => "application/json",
         Some("xml") => "application/xml",
         Some("doc") => "application/msword",
-        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("docx") => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
         Some("xls") => "application/vnd.ms-excel",
-        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("xlsx") => {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
         Some("odt") => "application/vnd.oasis.opendocument.text",
         Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
         Some("mp3") => "audio/mpeg",
@@ -78,7 +78,6 @@ impl AppModel {
                 if let Some(index) = self.selected_message {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Reply;
-                        // Auto-select owning account
                         self.compose_account = self
                             .account_index(&msg.account_id)
                             .unwrap_or(self.active_account.unwrap_or(0));
@@ -116,7 +115,6 @@ impl AppModel {
                 if let Some(index) = self.selected_message {
                     if let Some(msg) = self.messages.get(index) {
                         self.compose_mode = ComposeMode::Forward;
-                        // Auto-select owning account
                         self.compose_account = self
                             .account_index(&msg.account_id)
                             .unwrap_or(self.active_account.unwrap_or(0));
@@ -151,7 +149,7 @@ impl AppModel {
 
             Message::ComposeAccountChanged(i) => {
                 self.compose_account = i;
-                self.compose_from = 0; // Reset from index when account changes
+                self.compose_from = 0;
                 self.refresh_compose_cache();
             }
             Message::ComposeFromChanged(i) => {
@@ -276,13 +274,16 @@ impl AppModel {
                     return Task::none();
                 };
 
+                let Some(client) = acct.client.clone() else {
+                    self.compose_error = Some("Account not connected".into());
+                    return Task::none();
+                };
+
                 let from_addrs = &acct.config.email_addresses;
                 let from_addr = from_addrs
                     .get(self.compose_from)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        from_addrs.first().cloned().unwrap_or_default()
-                    });
+                    .unwrap_or_else(|| from_addrs.first().cloned().unwrap_or_default());
                 if from_addr.is_empty() {
                     self.compose_error = Some(
                         "No email address configured. Re-run setup to add one.".into(),
@@ -290,50 +291,77 @@ impl AppModel {
                     return Task::none();
                 }
 
+                // Find drafts and sent mailbox IDs for the batched create+submit
+                let drafts_id = neverlight_mail_core::mailbox::find_by_role(
+                    &acct.folders,
+                    "drafts",
+                );
+                let sent_id = neverlight_mail_core::mailbox::find_by_role(
+                    &acct.folders,
+                    "sent",
+                );
+
+                let Some(drafts_mailbox_id) = drafts_id else {
+                    self.compose_error = Some("Drafts folder not found".into());
+                    return Task::none();
+                };
+                let Some(sent_mailbox_id) = sent_id else {
+                    self.compose_error = Some("Sent folder not found".into());
+                    return Task::none();
+                };
+
                 self.is_sending = true;
                 self.compose_error = None;
 
-                let smtp_config = acct.config.smtp.clone();
-                let server_desc = format!(
-                    "{}:{} ({})",
-                    smtp_config.server,
-                    smtp_config.port,
-                    if smtp_config.use_starttls { "STARTTLS" } else { "implicit TLS" }
-                );
-                self.smtp_last_server = Some(server_desc.clone());
-                self.smtp_last_attempt_at = Some(Instant::now());
+                log::info!("JMAP send: from={}, to={}", from_addr, self.compose_to);
 
-                log::info!(
-                    "SMTP send: server={}, port={}, tls={}, user={}",
-                    smtp_config.server,
-                    smtp_config.port,
-                    if smtp_config.use_starttls { "starttls" } else { "implicit" },
-                    smtp_config.username,
-                );
-
-                let email = OutgoingEmail {
-                    from: from_addr,
-                    to: self.compose_to.clone(),
-                    subject: self.compose_subject.clone(),
-                    body: body_text,
-                    in_reply_to: self.compose_in_reply_to.clone(),
-                    references: self.compose_references.clone(),
-                    attachments: self.compose_attachments.clone(),
-                };
+                let to: Vec<String> = self
+                    .compose_to
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let subject = self.compose_subject.clone();
 
                 return cosmic::task::future(async move {
-                    let result = tokio::time::timeout(
-                        SMTP_SEND_TIMEOUT,
-                        smtp::send_email(&smtp_config, &email),
-                    )
-                    .await;
-                    match result {
-                        Ok(inner) => Message::SendComplete(inner),
-                        Err(_) => Message::SendComplete(Err(format!(
-                            "SMTP timeout after {}s connecting to {}",
-                            SMTP_SEND_TIMEOUT.as_secs(),
-                            server_desc,
-                        ))),
+                    // Fetch identities to find the right one
+                    let identities = match submit::get_identities(&client).await {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            return Message::SendComplete(Err(format!(
+                                "Failed to fetch identities: {e}"
+                            )));
+                        }
+                    };
+
+                    let identity = identities
+                        .iter()
+                        .find(|id| id.email == from_addr)
+                        .or_else(|| identities.first());
+
+                    let Some(identity) = identity else {
+                        return Message::SendComplete(Err(
+                            "No sender identity found".into()
+                        ));
+                    };
+
+                    let req = SendRequest {
+                        identity_id: &identity.id,
+                        from: &from_addr,
+                        to: &to,
+                        cc: &[],
+                        subject: &subject,
+                        text_body: &body_text,
+                        html_body: None,
+                        drafts_mailbox_id: &drafts_mailbox_id,
+                        sent_mailbox_id: &sent_mailbox_id,
+                    };
+
+                    match submit::send(&client, &req).await {
+                        Ok(_email_id) => Message::SendComplete(Ok(())),
+                        Err(e) => {
+                            Message::SendComplete(Err(format!("Send failed: {e}")))
+                        }
                     }
                 });
             }
@@ -346,8 +374,6 @@ impl AppModel {
             Message::SendComplete(Ok(())) => {
                 self.show_compose_dialog = false;
                 self.is_sending = false;
-                self.smtp_send_count += 1;
-                self.smtp_last_error = None;
                 self.compose_to.clear();
                 self.compose_subject.clear();
                 self.compose_body = text_editor::Content::new();
@@ -356,15 +382,13 @@ impl AppModel {
                 self.compose_attachments.clear();
                 self.compose_error = None;
                 self.status_message = "Message sent".into();
-                log::info!("SMTP send succeeded");
+                log::info!("JMAP send succeeded");
             }
 
             Message::SendComplete(Err(e)) => {
                 self.is_sending = false;
-                self.smtp_fail_count += 1;
-                self.smtp_last_error = Some(e.clone());
                 self.compose_error = Some(format!("Send failed: {e}"));
-                log::error!("SMTP send failed: {e}");
+                log::error!("JMAP send failed: {e}");
             }
 
             _ => {}
@@ -400,7 +424,6 @@ fn build_references(in_reply_to: Option<&str>, message_id: &str) -> String {
 }
 
 /// Parse a text/uri-list string into local file paths.
-/// Skips blank lines, comments (lines starting with #), and non-file:// URIs.
 fn parse_uri_list(uri_list: &str) -> Vec<String> {
     uri_list
         .lines()
@@ -416,7 +439,7 @@ fn parse_uri_list(uri_list: &str) -> Vec<String> {
         .collect()
 }
 
-/// Read a list of file paths into AttachmentData. Shared by portal and uri-list codepaths.
+/// Read a list of file paths into AttachmentData.
 async fn read_paths_as_attachments(paths: Vec<String>) -> Message {
     let mut attachments = Vec::new();
     for p in &paths {
@@ -491,11 +514,29 @@ mod tests {
 
     #[test]
     fn mime_from_ext_common_types() {
-        assert_eq!(mime_from_ext(std::path::Path::new("file.pdf")), "application/pdf");
-        assert_eq!(mime_from_ext(std::path::Path::new("photo.jpg")), "image/jpeg");
-        assert_eq!(mime_from_ext(std::path::Path::new("photo.JPEG")), "image/jpeg");
-        assert_eq!(mime_from_ext(std::path::Path::new("doc.txt")), "text/plain");
-        assert_eq!(mime_from_ext(std::path::Path::new("unknown.xyz")), "application/octet-stream");
-        assert_eq!(mime_from_ext(std::path::Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("file.pdf")),
+            "application/pdf"
+        );
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("photo.jpg")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("photo.JPEG")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("doc.txt")),
+            "text/plain"
+        );
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("unknown.xyz")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            mime_from_ext(std::path::Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 }

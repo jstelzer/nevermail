@@ -14,8 +14,8 @@ pub struct MessageListState<'a> {
     pub visible_indices: &'a [usize],
     pub selected: Option<usize>,
     pub has_more: bool,
-    pub collapsed_threads: &'a HashSet<u64>,
-    pub thread_sizes: &'a HashMap<u64, usize>,
+    pub collapsed_threads: &'a HashSet<String>,
+    pub thread_sizes: &'a HashMap<String, usize>,
     pub search_active: bool,
     pub search_query: &'a str,
 }
@@ -65,10 +65,10 @@ pub fn view<'a>(state: MessageListState<'a>) -> Element<'a, Message> {
 
             // Thread collapse/expand indicator for root messages with children
             let thread_indicator = if msg.thread_depth == 0 {
-                if let Some(tid) = msg.thread_id {
-                    let size = thread_sizes.get(&tid).copied().unwrap_or(1);
+                if let Some(ref tid) = msg.thread_id {
+                    let size = thread_sizes.get(tid).copied().unwrap_or(1);
                     if size > 1 {
-                        if collapsed_threads.contains(&tid) {
+                        if collapsed_threads.contains(tid) {
                             format!("▶ ({}) ", size - 1)
                         } else {
                             "▼ ".to_string()
@@ -100,14 +100,14 @@ pub fn view<'a>(state: MessageListState<'a>) -> Element<'a, Message> {
                 btn = btn.class(cosmic::theme::Button::Suggested);
             }
 
-            let env_hash = msg.envelope_hash;
-            let mbox_hash = msg.mailbox_hash;
+            let email_id = msg.email_id.clone();
+            let mailbox_id = msg.mailbox_id.clone();
             let source_account_id = msg.account_id.clone();
             let source = widget::dnd_source::<Message, DraggedMessage>(btn)
                 .drag_content(move || DraggedMessage {
                     source_account_id: source_account_id.clone(),
-                    envelope_hash: env_hash,
-                    source_mailbox: mbox_hash,
+                    email_id: email_id.clone(),
+                    source_mailbox_id: mailbox_id.clone(),
                 })
                 .drag_threshold(8.0);
 

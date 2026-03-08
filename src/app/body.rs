@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use cosmic::app::Task;
 use cosmic::widget::{image, markdown};
 use futures::future::{AbortHandle, Abortable};
-use neverlight_mail_core::EnvelopeHash;
 
 use super::{AppModel, Message};
 
@@ -17,11 +16,11 @@ fn body_error_indicates_stale_message(e: &str) -> bool {
 fn should_apply_body_result(
     current_epoch: u64,
     incoming_epoch: u64,
-    current_selected_envelope_hash: Option<u64>,
-    incoming_envelope_hash: u64,
+    current_selected_email_id: Option<&str>,
+    incoming_email_id: &str,
 ) -> bool {
     current_epoch == incoming_epoch
-        && current_selected_envelope_hash == Some(incoming_envelope_hash)
+        && current_selected_email_id == Some(incoming_email_id)
 }
 
 impl AppModel {
@@ -46,63 +45,53 @@ impl AppModel {
                     .get(index)
                     .is_some_and(|m| !m.is_read)
                 {
-                    let envelope_hash = self.messages[index].envelope_hash;
+                    let email_id = self.messages[index].email_id.clone();
                     cosmic::task::future(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        Message::AutoMarkRead(envelope_hash)
+                        Message::AutoMarkRead(email_id)
                     })
                 } else {
                     Task::none()
                 };
 
                 let body_task = if let Some(msg) = self.messages.get(index) {
-                    let envelope_hash = msg.envelope_hash;
-                    let account_id = Some(msg.account_id.clone());
+                    let email_id = msg.email_id.clone();
+                    let account_id = msg.account_id.clone();
 
                     if let Some(cache) = &self.cache {
-                        let Some(account_id_for_cache) = account_id.clone() else {
-                            let err = format!(
-                                "Cannot access body cache: no account for mailbox {}",
-                                msg.mailbox_hash
-                            );
-                            log::error!("{}", err);
-                            self.status_message = err;
-                            return auto_read_task;
-                        };
                         let cache = cache.clone();
-                        let session = account_id
-                            .as_deref()
-                            .and_then(|aid| {
-                                self.session_for_account_mailbox(aid, msg.mailbox_hash)
-                            })
-                            .or_else(|| self.active_session());
+                        let client = self.client_for_account(&account_id);
+                        let email_id_for_fetch = email_id.clone();
                         self.status_message = "Loading message...".into();
                         cosmic::task::future(async move {
                             let load = async move {
-                                // Unified cache-first: try cache (includes attachments)
+                                // Cache-first: try cache (includes attachments)
                                 if let Ok(Some((md_body, plain_body, attachments))) =
                                     cache
-                                        .load_body(account_id_for_cache.clone(), envelope_hash)
+                                        .load_body(account_id.clone(), email_id.clone())
                                         .await
                                 {
                                     return Message::BodyLoaded {
-                                        envelope_hash,
+                                        email_id,
                                         epoch: body_epoch,
                                         result: Ok((md_body, plain_body, attachments)),
                                     };
                                 }
 
-                                // Cache miss: fetch from IMAP, save to cache
-                                if let Some(session) = session {
-                                    let result = session
-                                        .fetch_body(EnvelopeHash(envelope_hash))
-                                        .await;
+                                // Cache miss: fetch from JMAP, save to cache
+                                if let Some(client) = client {
+                                    let result = neverlight_mail_core::email::get_body(
+                                        &client,
+                                        &email_id_for_fetch,
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string());
                                     match result {
                                         Ok((ref md_body, ref plain_body, ref attachments)) => {
                                             if let Err(e) = cache
                                                 .save_body(
-                                                    account_id_for_cache.clone(),
-                                                    envelope_hash,
+                                                    account_id.clone(),
+                                                    email_id_for_fetch.clone(),
                                                     md_body.clone(),
                                                     plain_body.clone(),
                                                     attachments.clone(),
@@ -112,30 +101,21 @@ impl AppModel {
                                                 log::warn!("Failed to cache body: {}", e);
                                             }
                                             Message::BodyLoaded {
-                                                envelope_hash,
+                                                email_id: email_id_for_fetch,
                                                 epoch: body_epoch,
                                                 result,
                                             }
                                         }
-                                        Err(ref e) if e.contains("not found") => {
-                                            // melib hasn't ingested this envelope yet
-                                            // (still syncing) — defer instead of erroring
-                                            log::debug!("Body fetch deferred (envelope not yet in melib): {}", e);
-                                            Message::BodyDeferred {
-                                                envelope_hash,
-                                                epoch: body_epoch,
-                                            }
-                                        }
                                         Err(_) => Message::BodyLoaded {
-                                            envelope_hash,
+                                            email_id: email_id_for_fetch,
                                             epoch: body_epoch,
                                             result,
                                         },
                                     }
                                 } else {
-                                    // Session not ready yet — signal deferral
+                                    // Client not ready yet — signal deferral
                                     Message::BodyDeferred {
-                                        envelope_hash,
+                                        email_id: email_id_for_fetch,
                                         epoch: body_epoch,
                                     }
                                 }
@@ -147,21 +127,20 @@ impl AppModel {
                             }
                         })
                     } else {
-                        // No-cache fallback: direct IMAP fetch
-                        let session = account_id
-                            .as_deref()
-                            .and_then(|aid| {
-                                self.session_for_account_mailbox(aid, msg.mailbox_hash)
-                            })
-                            .or_else(|| self.active_session());
-                        if let Some(session) = session {
+                        // No-cache fallback: direct JMAP fetch
+                        let client = self.client_for_account(&account_id);
+                        if let Some(client) = client {
                             self.status_message = "Loading message...".into();
                             cosmic::task::future(async move {
                                 let load = async move {
                                     Message::BodyLoaded {
-                                        envelope_hash,
+                                        email_id: email_id.clone(),
                                         epoch: body_epoch,
-                                        result: session.fetch_body(EnvelopeHash(envelope_hash)).await,
+                                        result: neverlight_mail_core::email::get_body(
+                                            &client, &email_id,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string()),
                                     }
                                 };
                                 match Abortable::new(load, abort_reg).await {
@@ -170,7 +149,7 @@ impl AppModel {
                                 }
                             })
                         } else {
-                            // No cache, no session — defer until connected
+                            // No cache, no client — defer until connected
                             self.pending_body = Some(index);
                             self.status_message = "Connecting...".into();
                             Task::none()
@@ -183,27 +162,23 @@ impl AppModel {
                 return cosmic::task::batch(vec![body_task, auto_read_task]);
             }
 
-            Message::BodyDeferred { envelope_hash, epoch } => {
-                let current_hash = self
+            Message::BodyDeferred { email_id, epoch } => {
+                let current_id = self
                     .selected_message
                     .and_then(|i| self.messages.get(i))
-                    .map(|m| m.envelope_hash);
-                if !should_apply_body_result(self.body_epoch, epoch, current_hash, envelope_hash) {
+                    .map(|m| m.email_id.as_str());
+                if !should_apply_body_result(self.body_epoch, epoch, current_id, &email_id) {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
                 self.body_abort = None;
-                // Cache missed and melib hasn't ingested the envelope yet.
-                // If sync already finished, retry after a short delay to give melib
-                // time to process. Otherwise defer until SyncMessagesComplete flushes.
                 if let Some(index) = self.selected_message {
                     const MAX_DEFER_RETRIES: u8 = 6;
 
                     if self.body_defer_retries < MAX_DEFER_RETRIES
                         && !self.is_busy()
-                        && self.active_session().is_some()
+                        && self.active_client().is_some()
                     {
-                        // Sync already completed — retry after a brief delay
                         self.body_defer_retries += 1;
                         self.status_message = "Loading message...".into();
                         return cosmic::task::future(async move {
@@ -227,21 +202,19 @@ impl AppModel {
             }
 
             Message::BodyLoaded {
-                envelope_hash,
+                email_id,
                 epoch,
                 result: Ok((markdown_body, plain_body, attachments)),
             } => {
-                let current_hash = self
+                let current_id = self
                     .selected_message
                     .and_then(|i| self.messages.get(i))
-                    .map(|m| m.envelope_hash);
-                if !should_apply_body_result(self.body_epoch, epoch, current_hash, envelope_hash) {
+                    .map(|m| m.email_id.as_str());
+                if !should_apply_body_result(self.body_epoch, epoch, current_id, &email_id) {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
                 self.body_abort = None;
-                // Safety net: if clean_email_html still produces too many items
-                // (the markdown widget has no virtualization), fall back to plain text.
                 const MAX_MD_ITEMS: usize = 200;
 
                 let items: Vec<markdown::Item> = markdown::parse(&markdown_body).collect();
@@ -259,7 +232,6 @@ impl AppModel {
                         items.len(),
                         MAX_MD_ITEMS
                     );
-                    // Plain text through markdown::parse produces ~1 item per paragraph
                     self.preview_markdown = markdown::parse(&plain_body).collect();
                 }
                 self.preview_body = plain_body;
@@ -277,21 +249,19 @@ impl AppModel {
                 self.status_message = "Ready".into();
             }
             Message::BodyLoaded {
-                envelope_hash,
+                email_id,
                 epoch,
                 result: Err(e),
             } => {
-                let current_hash = self
+                let current_id = self
                     .selected_message
                     .and_then(|i| self.messages.get(i))
-                    .map(|m| m.envelope_hash);
-                if !should_apply_body_result(self.body_epoch, epoch, current_hash, envelope_hash) {
+                    .map(|m| m.email_id.as_str());
+                if !should_apply_body_result(self.body_epoch, epoch, current_id, &email_id) {
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
                 self.body_abort = None;
-                // If still syncing, melib's store may not have the envelope yet.
-                // Defer the fetch instead of showing an error.
                 if self.is_busy() {
                     if let Some(index) = self.selected_message {
                         log::debug!("Body fetch deferred (still syncing): {}", e);
@@ -302,27 +272,26 @@ impl AppModel {
                 }
 
                 // Stale message: cached TOC has it but server doesn't.
-                // Evict from the list and trigger a refresh to reconcile.
                 if body_error_indicates_stale_message(&e) {
                     log::warn!(
                         "Evicting stale message {} (body error: {})",
-                        envelope_hash,
+                        email_id,
                         e
                     );
                     if let Some(pos) = self
                         .messages
                         .iter()
-                        .position(|m| m.envelope_hash == envelope_hash)
+                        .position(|m| m.email_id == email_id)
                     {
                         let account_id = self.messages[pos].account_id.clone();
                         self.remove_message_optimistic(pos);
-                        // Evict from cache too
                         if let Some(cache) = &self.cache {
                             let cache = cache.clone();
+                            let eid = email_id.clone();
                             if !account_id.is_empty() {
                                 let evict_task = cosmic::task::future(async move {
                                     if let Err(e) = cache
-                                        .remove_message(account_id, envelope_hash)
+                                        .remove_message(account_id, eid)
                                         .await
                                     {
                                         log::warn!(
@@ -404,17 +373,17 @@ mod tests {
 
     #[test]
     fn body_result_applies_when_epoch_and_selected_message_match() {
-        assert!(should_apply_body_result(7, 7, Some(42), 42));
+        assert!(should_apply_body_result(7, 7, Some("M42"), "M42"));
     }
 
     #[test]
     fn body_result_drops_when_epoch_is_stale() {
-        assert!(!should_apply_body_result(8, 7, Some(42), 42));
+        assert!(!should_apply_body_result(8, 7, Some("M42"), "M42"));
     }
 
     #[test]
     fn body_result_drops_when_selection_has_switched() {
-        assert!(!should_apply_body_result(7, 7, Some(99), 42));
-        assert!(!should_apply_body_result(7, 7, None, 42));
+        assert!(!should_apply_body_result(7, 7, Some("M99"), "M42"));
+        assert!(!should_apply_body_result(7, 7, None, "M42"));
     }
 }

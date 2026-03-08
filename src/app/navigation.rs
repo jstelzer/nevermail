@@ -73,20 +73,21 @@ impl AppModel {
             Message::ToggleThreadCollapse => {
                 if let Some(index) = self.selected_message {
                     if let Some(msg) = self.messages.get(index) {
-                        if let Some(tid) = msg.thread_id {
-                            let size = self.thread_sizes.get(&tid).copied().unwrap_or(1);
+                        if let Some(ref tid) = msg.thread_id {
+                            let size = self.thread_sizes.get(tid).copied().unwrap_or(1);
                             if size > 1 {
-                                if self.collapsed_threads.contains(&tid) {
-                                    // Expand
-                                    self.collapsed_threads.remove(&tid);
+                                if self.collapsed_threads.contains(tid) {
+                                    self.collapsed_threads.remove(tid);
                                 } else {
-                                    // Collapse — if selected message is a child, jump to root
-                                    self.collapsed_threads.insert(tid);
+                                    self.collapsed_threads.insert(tid.clone());
                                     if msg.thread_depth > 0 {
-                                        // Find the thread root (first message with this thread_id and depth 0)
-                                        if let Some(root_idx) = self.messages.iter().position(|m| {
-                                            m.thread_id == Some(tid) && m.thread_depth == 0
-                                        }) {
+                                        let tid_match = tid.clone();
+                                        if let Some(root_idx) =
+                                            self.messages.iter().position(|m| {
+                                                m.thread_id.as_deref() == Some(&tid_match)
+                                                    && m.thread_depth == 0
+                                            })
+                                        {
                                             self.selected_message = Some(root_idx);
                                         }
                                     }
@@ -106,21 +107,19 @@ impl AppModel {
     /// Rebuild `visible_indices` and `thread_sizes` based on current messages
     /// and collapsed state.
     pub(super) fn recompute_visible(&mut self) {
-        // Rebuild thread_sizes
         self.thread_sizes.clear();
         for msg in &self.messages {
-            if let Some(tid) = msg.thread_id {
-                *self.thread_sizes.entry(tid).or_insert(0) += 1;
+            if let Some(ref tid) = msg.thread_id {
+                *self.thread_sizes.entry(tid.clone()).or_insert(0) += 1;
             }
         }
 
-        // Rebuild visible_indices: hide children of collapsed threads
         self.visible_indices.clear();
         for (i, msg) in self.messages.iter().enumerate() {
             if msg.thread_depth > 0 {
-                if let Some(tid) = msg.thread_id {
-                    if self.collapsed_threads.contains(&tid) {
-                        continue; // hidden child
+                if let Some(ref tid) = msg.thread_id {
+                    if self.collapsed_threads.contains(tid) {
+                        continue;
                     }
                 }
             }
@@ -130,7 +129,6 @@ impl AppModel {
         self.revalidate_selection();
     }
 
-    /// Keep selection valid against current canonical TOC projection.
     fn revalidate_selection(&mut self) {
         let old = self.selected_message;
         let next = revalidated_selection(old, self.messages.len(), &self.visible_indices);

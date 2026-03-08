@@ -24,16 +24,6 @@ pub struct DiagnosticsState<'a> {
     pub refresh_in_flight: bool,
 }
 
-pub struct SmtpDiagnosticsState<'a> {
-    pub collapsed: bool,
-    pub send_count: u64,
-    pub fail_count: u64,
-    pub last_error: Option<&'a str>,
-    pub last_attempt_at: Option<std::time::Instant>,
-    pub last_server: Option<&'a str>,
-    pub in_flight: bool,
-}
-
 /// Render the folder sidebar with multi-account sections.
 pub fn view<'a>(
     accounts: &'a [AccountState],
@@ -41,7 +31,6 @@ pub fn view<'a>(
     selected_folder: Option<usize>,
     drag_target: Option<usize>,
     diagnostics: DiagnosticsState<'a>,
-    smtp_diagnostics: SmtpDiagnosticsState<'a>,
 ) -> Element<'a, Message> {
     let mut col = widget::column().spacing(4).padding(8);
 
@@ -155,7 +144,7 @@ pub fn view<'a>(
                             btn = btn.class(cosmic::theme::Button::Suggested);
                         }
 
-                        let mailbox_hash = folder.mailbox_hash;
+                        let mailbox_id = folder.mailbox_id.clone();
                         let dest_account_id = acct.config.id.clone();
                         let dest = widget::dnd_destination::dnd_destination_for_data::<
                             DraggedMessage,
@@ -164,16 +153,16 @@ pub fn view<'a>(
                             Some(msg) => Message::DragMessageToFolder {
                                 message: MessageIdentity {
                                     account_id: msg.source_account_id.clone(),
-                                    mailbox_hash: msg.source_mailbox,
-                                    envelope_hash: msg.envelope_hash,
+                                    mailbox_id: msg.source_mailbox_id.clone(),
+                                    email_id: msg.email_id.clone(),
                                 },
                                 source: MailboxIdentity {
                                     account_id: msg.source_account_id,
-                                    mailbox_hash: msg.source_mailbox,
+                                    mailbox_id: msg.source_mailbox_id,
                                 },
                                 dest: MailboxIdentity {
                                     account_id: dest_account_id.clone(),
-                                    mailbox_hash,
+                                    mailbox_id: mailbox_id.clone(),
                                 },
                             },
                             None => Message::Noop,
@@ -207,13 +196,11 @@ pub fn view<'a>(
 
     let status_pill = status_pill_view(accounts, active_account);
     let diagnostics_panel = diagnostics_view(diagnostics);
-    let smtp_panel = smtp_diagnostics_view(smtp_diagnostics);
 
     widget::column()
         .push(scrollable_folders)
         .push(status_pill)
         .push(diagnostics_panel)
-        .push(smtp_panel)
         .height(Length::Fill)
         .into()
 }
@@ -402,61 +389,4 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
     out.push_str("...");
     out
-}
-
-fn smtp_diagnostics_view<'a>(state: SmtpDiagnosticsState<'a>) -> Element<'a, Message> {
-    let toggle_label = if state.collapsed {
-        "SMTP \u{25B6}"
-    } else {
-        "SMTP \u{25BC}"
-    };
-
-    let header = widget::button::text(toggle_label)
-        .on_press(Message::ToggleSmtpDiagnostics)
-        .width(Length::Fill);
-
-    if state.collapsed {
-        return widget::container(header)
-            .padding([4, 8])
-            .width(Length::Fill)
-            .class(cosmic::style::Container::Card)
-            .into();
-    }
-
-    let mut col = widget::column().spacing(2).push(header);
-
-    if state.in_flight {
-        let label = match state.last_server {
-            Some(s) => format!("Sending via {}...", s),
-            None => "Sending...".into(),
-        };
-        col = col.push(widget::text::caption(label));
-    }
-    if state.send_count > 0 || state.fail_count > 0 {
-        col = col.push(widget::text::caption(format!(
-            "Sent: {}  Failed: {}",
-            state.send_count, state.fail_count
-        )));
-    }
-    if let Some(t) = state.last_attempt_at {
-        col = col.push(widget::text::caption(format!(
-            "Last attempt: {}",
-            ago_label(Some(t))
-        )));
-    }
-    if let Some(server) = state.last_server {
-        col = col.push(widget::text::caption(format!("Server: {}", server)));
-    }
-    if let Some(err) = state.last_error {
-        col = col.push(widget::text::caption(format!(
-            "Last error: {}",
-            truncate(err, 56)
-        )));
-    }
-
-    widget::container(col)
-        .padding([4, 8])
-        .width(Length::Fill)
-        .class(cosmic::style::Container::Card)
-        .into()
 }
