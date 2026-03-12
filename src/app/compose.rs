@@ -75,76 +75,80 @@ impl AppModel {
                 if self.setup_model.is_some() || self.show_compose_dialog {
                     return Task::none();
                 }
-                if let Some(index) = self.selected_message {
-                    if let Some(msg) = self.messages.get(index) {
-                        self.compose_mode = ComposeMode::Reply;
-                        self.compose_account = self
-                            .account_index(&msg.account_id)
-                            .unwrap_or(self.active_account.unwrap_or(0));
-                        self.compose_to = msg.from.clone();
+                let Some(index) = self.selected_message else {
+                    return Task::none();
+                };
+                let Some(msg) = self.messages.get(index) else {
+                    return Task::none();
+                };
+                self.compose_mode = ComposeMode::Reply;
+                self.compose_account = self
+                    .account_index(&msg.account_id)
+                    .unwrap_or(self.active_account.unwrap_or(0));
+                self.compose_to = msg.from.clone();
 
-                        let subj = &msg.subject;
-                        self.compose_subject = if subj.starts_with("Re: ") {
-                            subj.clone()
-                        } else {
-                            format!("Re: {subj}")
-                        };
+                let subj = &msg.subject;
+                self.compose_subject = if subj.starts_with("Re: ") {
+                    subj.clone()
+                } else {
+                    format!("Re: {subj}")
+                };
 
-                        let quoted = quote_body(&self.preview_body, &msg.from, &msg.date);
-                        self.compose_body =
-                            text_editor::Content::with_text(&format!("\n\n{quoted}"));
+                let quoted = quote_body(&self.preview_body, &msg.from, &msg.date);
+                self.compose_body =
+                    text_editor::Content::with_text(&format!("\n\n{quoted}"));
 
-                        self.compose_in_reply_to = Some(msg.message_id.clone());
-                        self.compose_references = Some(build_references(
-                            msg.in_reply_to.as_deref(),
-                            &msg.message_id,
-                        ));
-                        self.compose_attachments.clear();
-                        self.compose_error = None;
-                        self.is_sending = false;
-                        self.show_compose_dialog = true;
-                        self.refresh_compose_cache();
-                    }
-                }
+                self.compose_in_reply_to = Some(msg.message_id.clone());
+                self.compose_references = Some(build_references(
+                    msg.in_reply_to.as_deref(),
+                    &msg.message_id,
+                ));
+                self.compose_attachments.clear();
+                self.compose_error = None;
+                self.is_sending = false;
+                self.show_compose_dialog = true;
+                self.refresh_compose_cache();
             }
 
             Message::ComposeForward => {
                 if self.setup_model.is_some() || self.show_compose_dialog {
                     return Task::none();
                 }
-                if let Some(index) = self.selected_message {
-                    if let Some(msg) = self.messages.get(index) {
-                        self.compose_mode = ComposeMode::Forward;
-                        self.compose_account = self
-                            .account_index(&msg.account_id)
-                            .unwrap_or(self.active_account.unwrap_or(0));
-                        self.compose_to.clear();
+                let Some(index) = self.selected_message else {
+                    return Task::none();
+                };
+                let Some(msg) = self.messages.get(index) else {
+                    return Task::none();
+                };
+                self.compose_mode = ComposeMode::Forward;
+                self.compose_account = self
+                    .account_index(&msg.account_id)
+                    .unwrap_or(self.active_account.unwrap_or(0));
+                self.compose_to.clear();
 
-                        let subj = &msg.subject;
-                        self.compose_subject = if subj.starts_with("Fwd: ") {
-                            subj.clone()
-                        } else {
-                            format!("Fwd: {subj}")
-                        };
+                let subj = &msg.subject;
+                self.compose_subject = if subj.starts_with("Fwd: ") {
+                    subj.clone()
+                } else {
+                    format!("Fwd: {subj}")
+                };
 
-                        let fwd = forward_body(
-                            &self.preview_body,
-                            &msg.from,
-                            &msg.date,
-                            &msg.subject,
-                        );
-                        self.compose_body =
-                            text_editor::Content::with_text(&format!("\n\n{fwd}"));
+                let fwd = forward_body(
+                    &self.preview_body,
+                    &msg.from,
+                    &msg.date,
+                    &msg.subject,
+                );
+                self.compose_body =
+                    text_editor::Content::with_text(&format!("\n\n{fwd}"));
 
-                        self.compose_in_reply_to = None;
-                        self.compose_references = None;
-                        self.compose_attachments = self.preview_attachments.clone();
-                        self.compose_error = None;
-                        self.is_sending = false;
-                        self.show_compose_dialog = true;
-                        self.refresh_compose_cache();
-                    }
-                }
+                self.compose_in_reply_to = None;
+                self.compose_references = None;
+                self.compose_attachments = self.preview_attachments.clone();
+                self.compose_error = None;
+                self.is_sending = false;
+                self.show_compose_dialog = true;
+                self.refresh_compose_cache();
             }
 
             Message::ComposeAccountChanged(i) => {

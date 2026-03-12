@@ -27,8 +27,7 @@ impl AppModel {
                     .selected_message
                     .and_then(|i| self.messages.get(i))
                     .is_some_and(|m| m.email_id == email_id && !m.is_read);
-                if still_selected {
-                    let index = self.selected_message.unwrap();
+                if let (true, Some(index)) = (still_selected, self.selected_message) {
                     return self.dispatch(Message::ToggleRead(index));
                 }
             }
@@ -471,71 +470,65 @@ impl AppModel {
     }
 
     fn trash_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
-        if let Some(msg) = self.messages.get(index) {
-            let account_id = msg.account_id.clone();
-            let mailbox_id = msg.mailbox_id.clone();
-            let email_id = msg.email_id.clone();
-            if let Some(acct) = self
-                .account_index(&account_id)
-                .and_then(|idx| self.accounts.get(idx))
-            {
-                if let Some(trash_id) =
-                    neverlight_mail_core::mailbox::find_by_role(&acct.folders, "trash")
-                {
-                    return Some(PendingMoveIntent {
-                        message: MessageIdentity {
-                            account_id: account_id.clone(),
-                            mailbox_id: mailbox_id.clone(),
-                            email_id,
-                        },
-                        source: MailboxIdentity {
-                            account_id: account_id.clone(),
-                            mailbox_id,
-                        },
-                        dest: MailboxIdentity {
-                            account_id,
-                            mailbox_id: trash_id,
-                        },
-                    });
-                }
-            }
+        let msg = self.messages.get(index)?;
+        let account_id = msg.account_id.clone();
+        let mailbox_id = msg.mailbox_id.clone();
+        let email_id = msg.email_id.clone();
+        let acct = self
+            .account_index(&account_id)
+            .and_then(|idx| self.accounts.get(idx))?;
+        let Some(trash_id) =
+            neverlight_mail_core::mailbox::find_by_role(&acct.folders, "trash")
+        else {
             self.status_message = "Trash folder not found".into();
-        }
-        None
+            return None;
+        };
+        Some(PendingMoveIntent {
+            message: MessageIdentity {
+                account_id: account_id.clone(),
+                mailbox_id: mailbox_id.clone(),
+                email_id,
+            },
+            source: MailboxIdentity {
+                account_id: account_id.clone(),
+                mailbox_id,
+            },
+            dest: MailboxIdentity {
+                account_id,
+                mailbox_id: trash_id,
+            },
+        })
     }
 
     fn archive_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
-        if let Some(msg) = self.messages.get(index) {
-            let account_id = msg.account_id.clone();
-            let mailbox_id = msg.mailbox_id.clone();
-            let email_id = msg.email_id.clone();
-            if let Some(acct) = self
-                .account_index(&account_id)
-                .and_then(|idx| self.accounts.get(idx))
-            {
-                if let Some(archive_id) =
-                    neverlight_mail_core::mailbox::find_by_role(&acct.folders, "archive")
-                {
-                    return Some(PendingMoveIntent {
-                        message: MessageIdentity {
-                            account_id: account_id.clone(),
-                            mailbox_id: mailbox_id.clone(),
-                            email_id,
-                        },
-                        source: MailboxIdentity {
-                            account_id: account_id.clone(),
-                            mailbox_id,
-                        },
-                        dest: MailboxIdentity {
-                            account_id,
-                            mailbox_id: archive_id,
-                        },
-                    });
-                }
-            }
+        let msg = self.messages.get(index)?;
+        let account_id = msg.account_id.clone();
+        let mailbox_id = msg.mailbox_id.clone();
+        let email_id = msg.email_id.clone();
+        let acct = self
+            .account_index(&account_id)
+            .and_then(|idx| self.accounts.get(idx))?;
+        let Some(archive_id) =
+            neverlight_mail_core::mailbox::find_by_role(&acct.folders, "archive")
+        else {
             self.status_message = "Archive folder not found".into();
-        }
-        None
+            return None;
+        };
+        Some(PendingMoveIntent {
+            message: MessageIdentity {
+                account_id: account_id.clone(),
+                mailbox_id: mailbox_id.clone(),
+                email_id,
+            },
+            source: MailboxIdentity {
+                account_id: account_id.clone(),
+                mailbox_id,
+            },
+            dest: MailboxIdentity {
+                account_id,
+                mailbox_id: archive_id,
+            },
+        })
     }
 
     /// Optimistically remove a message from the list and adjust selection.

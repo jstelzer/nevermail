@@ -25,51 +25,53 @@ impl AppModel {
         self.accounts[idx].rebuild_folder_map();
 
         // Auto-select INBOX of first account if nothing selected
-        if self.active_account.is_none() {
-            if let Some(fi) = self.accounts[idx].folders.iter().position(|f| f.path == "INBOX") {
-                self.active_account = Some(idx);
-                self.selected_folder = Some(fi);
-                self.selected_mailbox_id =
-                    Some(self.accounts[idx].folders[fi].mailbox_id.clone());
-                self.selected_folder_evicted = false;
-                let mailbox_id = self.accounts[idx].folders[fi].mailbox_id.clone();
-                if let Some(cache) = &self.cache {
-                    let cache = cache.clone();
-                    let aid = account_id.clone();
-                    self.folder_epoch = self.folder_epoch.saturating_add(1);
-                    let epoch = self.folder_epoch;
-                    self.messages_offset = 0;
-                    if let Some(handle) = self.folder_abort.take() {
-                        handle.abort();
-                    }
-                    let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                    self.folder_abort = Some(abort_handle);
-                    return cosmic::task::future(async move {
-                        match Abortable::new(
-                            cache.load_messages(
-                                aid.clone(),
-                                mailbox_id.clone(),
-                                DEFAULT_PAGE_SIZE,
-                                0,
-                            ),
-                            abort_reg,
-                        )
-                        .await
-                        {
-                            Ok(result) => Message::CachedMessagesLoaded {
-                                account_id: aid,
-                                mailbox_id,
-                                offset: 0,
-                                epoch,
-                                result,
-                            },
-                            Err(_) => Message::Noop,
-                        }
-                    });
-                }
-            }
+        if self.active_account.is_some() {
+            return Task::none();
         }
-        Task::none()
+        let Some(fi) = self.accounts[idx].folders.iter().position(|f| f.path == "INBOX") else {
+            return Task::none();
+        };
+        self.active_account = Some(idx);
+        self.selected_folder = Some(fi);
+        self.selected_mailbox_id =
+            Some(self.accounts[idx].folders[fi].mailbox_id.clone());
+        self.selected_folder_evicted = false;
+        let mailbox_id = self.accounts[idx].folders[fi].mailbox_id.clone();
+        let Some(cache) = &self.cache else {
+            return Task::none();
+        };
+        let cache = cache.clone();
+        let aid = account_id.clone();
+        self.folder_epoch = self.folder_epoch.saturating_add(1);
+        let epoch = self.folder_epoch;
+        self.messages_offset = 0;
+        if let Some(handle) = self.folder_abort.take() {
+            handle.abort();
+        }
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        self.folder_abort = Some(abort_handle);
+        cosmic::task::future(async move {
+            match Abortable::new(
+                cache.load_messages(
+                    aid.clone(),
+                    mailbox_id.clone(),
+                    DEFAULT_PAGE_SIZE,
+                    0,
+                ),
+                abort_reg,
+            )
+            .await
+            {
+                Ok(result) => Message::CachedMessagesLoaded {
+                    account_id: aid,
+                    mailbox_id,
+                    offset: 0,
+                    epoch,
+                    result,
+                },
+                Err(_) => Message::Noop,
+            }
+        })
     }
 
     pub(super) fn handle_account_connected_ok(
@@ -248,70 +250,74 @@ impl AppModel {
         self.revalidate_selected_folder();
 
         // If this is the active account, sync the selected folder's messages
-        if self.active_account == Some(idx) {
-            if let Some(fi) = self.selected_folder {
-                if let Some(folder) = self.accounts[idx].folders.get(fi) {
-                    let mailbox_id = folder.mailbox_id.clone();
-                    if let Some(client) = &self.accounts[idx].client {
-                        let client = client.clone();
-                        let cache = self.cache.clone();
-                        let mid = mailbox_id.clone();
-                        let aid = account_id.clone();
-                        let aid_for_cache = aid.clone();
-                        self.message_epoch = self.message_epoch.saturating_add(1);
-                        let message_epoch = self.message_epoch;
-                        if let Some(handle) = self.message_abort.take() {
-                            handle.abort();
-                        }
-                        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                        self.message_abort = Some(abort_handle);
-                        let fetch_task = cosmic::task::future(async move {
-                            let result = match Abortable::new(
-                                neverlight_mail_core::email::query_and_get(
-                                    &client,
-                                    &mid,
-                                    DEFAULT_PAGE_SIZE,
-                                    0,
-                                ),
-                                abort_reg,
-                            )
-                            .await
-                            {
-                                Ok(result) => result.map(|(msgs, _query_result)| msgs).map_err(|e| e.to_string()),
-                                Err(_) => return Message::Noop,
-                            };
-                            if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
-                                if let Err(e) =
-                                    cache.save_messages(aid_for_cache, mid.clone(), msgs.clone()).await
-                                {
-                                    log::warn!("Failed to cache messages: {}", e);
-                                }
-                            }
-                            match result {
-                                Ok(_) => Message::SyncMessagesComplete {
-                                    account_id: aid,
-                                    mailbox_id: mid,
-                                    epoch: message_epoch,
-                                    result: Ok(()),
-                                },
-                                Err(e) => Message::SyncMessagesComplete {
-                                    account_id: aid,
-                                    mailbox_id: mid,
-                                    epoch: message_epoch,
-                                    result: Err(e),
-                                },
-                            }
-                        });
-                        if refresh_completed && self.refresh_pending {
-                            self.refresh_pending = false;
-                            let refresh_task = self.dispatch(Message::Refresh);
-                            return cosmic::task::batch(vec![fetch_task, refresh_task]);
-                        }
-                        return fetch_task;
+        let can_fetch = self.active_account == Some(idx)
+            && self.selected_folder.is_some()
+            && self
+                .selected_folder
+                .and_then(|fi| self.accounts[idx].folders.get(fi))
+                .is_some()
+            && self.accounts[idx].client.is_some();
+
+        if can_fetch {
+            let fi = self.selected_folder.expect("checked above");
+            let mailbox_id = self.accounts[idx].folders[fi].mailbox_id.clone();
+            let client = self.accounts[idx].client.clone().expect("checked above");
+            let cache = self.cache.clone();
+            let mid = mailbox_id.clone();
+            let aid = account_id.clone();
+            let aid_for_cache = aid.clone();
+            self.message_epoch = self.message_epoch.saturating_add(1);
+            let message_epoch = self.message_epoch;
+            if let Some(handle) = self.message_abort.take() {
+                handle.abort();
+            }
+            let (abort_handle, abort_reg) = AbortHandle::new_pair();
+            self.message_abort = Some(abort_handle);
+            let fetch_task = cosmic::task::future(async move {
+                let result = match Abortable::new(
+                    neverlight_mail_core::email::query_and_get(
+                        &client,
+                        &mid,
+                        DEFAULT_PAGE_SIZE,
+                        0,
+                    ),
+                    abort_reg,
+                )
+                .await
+                {
+                    Ok(result) => result.map(|(msgs, _query_result)| msgs).map_err(|e| e.to_string()),
+                    Err(_) => return Message::Noop,
+                };
+                if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
+                    if let Err(e) =
+                        cache.save_messages(aid_for_cache, mid.clone(), msgs.clone()).await
+                    {
+                        log::warn!("Failed to cache messages: {}", e);
                     }
                 }
+                match result {
+                    Ok(_) => Message::SyncMessagesComplete {
+                        account_id: aid,
+                        mailbox_id: mid,
+                        epoch: message_epoch,
+                        result: Ok(()),
+                    },
+                    Err(e) => Message::SyncMessagesComplete {
+                        account_id: aid,
+                        mailbox_id: mid,
+                        epoch: message_epoch,
+                        result: Err(e),
+                    },
+                }
+            });
+            if refresh_completed && self.refresh_pending {
+                self.refresh_pending = false;
+                let refresh_task = self.dispatch(Message::Refresh);
+                return cosmic::task::batch(vec![fetch_task, refresh_task]);
             }
+            return fetch_task;
         }
+
         if refresh_completed && self.refresh_pending {
             self.refresh_pending = false;
             return self.dispatch(Message::Refresh);
@@ -414,46 +420,51 @@ impl AppModel {
         self.last_sync_at = Some(Instant::now());
         let mut tasks: Vec<Task<Message>> = Vec::new();
 
-        if let Some(acct_idx) = self.active_account {
-            if let Some(fi) = self.selected_folder {
-                if let Some(folder) = self.accounts.get(acct_idx).and_then(|a| a.folders.get(fi)) {
-                    let mailbox_id = folder.mailbox_id.clone();
-                    if let Some(cache) = &self.cache {
-                        let cache = cache.clone();
-                        let aid = self.active_account_id();
-                        self.messages_offset = 0;
-                        self.folder_epoch = self.folder_epoch.saturating_add(1);
-                        let folder_epoch = self.folder_epoch;
-                        if let Some(handle) = self.folder_abort.take() {
-                            handle.abort();
-                        }
-                        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                        self.folder_abort = Some(abort_handle);
-                        tasks.push(cosmic::task::future(async move {
-                            match Abortable::new(
-                                cache.load_messages(
-                                    aid.clone(),
-                                    mailbox_id.clone(),
-                                    DEFAULT_PAGE_SIZE,
-                                    0,
-                                ),
-                                abort_reg,
-                            )
-                            .await
-                            {
-                                Ok(result) => Message::CachedMessagesLoaded {
-                                    account_id: aid,
-                                    mailbox_id,
-                                    offset: 0,
-                                    epoch: folder_epoch,
-                                    result,
-                                },
-                                Err(_) => Message::Noop,
-                            }
-                        }));
-                    }
-                }
+        let has_cache_reload_target = self.active_account.is_some()
+            && self.selected_folder.is_some()
+            && self
+                .active_account
+                .and_then(|ai| self.accounts.get(ai))
+                .and_then(|a| self.selected_folder.and_then(|fi| a.folders.get(fi)))
+                .is_some()
+            && self.cache.is_some();
+
+        if has_cache_reload_target {
+            let acct_idx = self.active_account.expect("checked above");
+            let fi = self.selected_folder.expect("checked above");
+            let mailbox_id = self.accounts[acct_idx].folders[fi].mailbox_id.clone();
+            let cache = self.cache.clone().expect("checked above");
+            let aid = self.active_account_id();
+            self.messages_offset = 0;
+            self.folder_epoch = self.folder_epoch.saturating_add(1);
+            let folder_epoch = self.folder_epoch;
+            if let Some(handle) = self.folder_abort.take() {
+                handle.abort();
             }
+            let (abort_handle, abort_reg) = AbortHandle::new_pair();
+            self.folder_abort = Some(abort_handle);
+            tasks.push(cosmic::task::future(async move {
+                match Abortable::new(
+                    cache.load_messages(
+                        aid.clone(),
+                        mailbox_id.clone(),
+                        DEFAULT_PAGE_SIZE,
+                        0,
+                    ),
+                    abort_reg,
+                )
+                .await
+                {
+                    Ok(result) => Message::CachedMessagesLoaded {
+                        account_id: aid,
+                        mailbox_id,
+                        offset: 0,
+                        epoch: folder_epoch,
+                        result,
+                    },
+                    Err(_) => Message::Noop,
+                }
+            }));
         }
 
         if let Some(index) = self.pending_body.take() {

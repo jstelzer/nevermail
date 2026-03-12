@@ -54,109 +54,96 @@ impl AppModel {
                     Task::none()
                 };
 
-                let body_task = if let Some(msg) = self.messages.get(index) {
-                    let email_id = msg.email_id.clone();
-                    let account_id = msg.account_id.clone();
+                let Some(msg) = self.messages.get(index) else {
+                    return auto_read_task;
+                };
+                let email_id = msg.email_id.clone();
+                let account_id = msg.account_id.clone();
 
-                    if let Some(cache) = &self.cache {
-                        let cache = cache.clone();
-                        let client = self.client_for_account(&account_id);
-                        let email_id_for_fetch = email_id.clone();
-                        self.status_message = "Loading message...".into();
-                        cosmic::task::future(async move {
-                            let load = async move {
-                                // Cache-first: try cache (includes attachments)
-                                if let Ok(Some((md_body, plain_body, attachments))) =
-                                    cache
-                                        .load_body(account_id.clone(), email_id.clone())
-                                        .await
-                                {
-                                    return Message::BodyLoaded {
-                                        email_id,
-                                        epoch: body_epoch,
-                                        result: Ok((md_body, plain_body, attachments)),
-                                    };
-                                }
+                let body_task = if let Some(cache) = &self.cache {
+                    let cache = cache.clone();
+                    let client = self.client_for_account(&account_id);
+                    let email_id_for_fetch = email_id.clone();
+                    self.status_message = "Loading message...".into();
+                    cosmic::task::future(async move {
+                        let load = async move {
+                            // Cache-first: try cache (includes attachments)
+                            if let Ok(Some((md_body, plain_body, attachments))) =
+                                cache
+                                    .load_body(account_id.clone(), email_id.clone())
+                                    .await
+                            {
+                                return Message::BodyLoaded {
+                                    email_id,
+                                    epoch: body_epoch,
+                                    result: Ok((md_body, plain_body, attachments)),
+                                };
+                            }
 
-                                // Cache miss: fetch from JMAP, save to cache
-                                if let Some(client) = client {
-                                    let result = neverlight_mail_core::email::get_body(
-                                        &client,
-                                        &email_id_for_fetch,
+                            // Cache miss: fetch from JMAP, save to cache
+                            let Some(client) = client else {
+                                return Message::BodyDeferred {
+                                    email_id: email_id_for_fetch,
+                                    epoch: body_epoch,
+                                };
+                            };
+                            let result = neverlight_mail_core::email::get_body(
+                                &client,
+                                &email_id_for_fetch,
+                            )
+                            .await
+                            .map_err(|e| e.to_string());
+                            if let Ok((ref md_body, ref plain_body, ref attachments)) = result {
+                                if let Err(e) = cache
+                                    .save_body(
+                                        account_id.clone(),
+                                        email_id_for_fetch.clone(),
+                                        md_body.clone(),
+                                        plain_body.clone(),
+                                        attachments.clone(),
                                     )
                                     .await
-                                    .map_err(|e| e.to_string());
-                                    match result {
-                                        Ok((ref md_body, ref plain_body, ref attachments)) => {
-                                            if let Err(e) = cache
-                                                .save_body(
-                                                    account_id.clone(),
-                                                    email_id_for_fetch.clone(),
-                                                    md_body.clone(),
-                                                    plain_body.clone(),
-                                                    attachments.clone(),
-                                                )
-                                                .await
-                                            {
-                                                log::warn!("Failed to cache body: {}", e);
-                                            }
-                                            Message::BodyLoaded {
-                                                email_id: email_id_for_fetch,
-                                                epoch: body_epoch,
-                                                result,
-                                            }
-                                        }
-                                        Err(_) => Message::BodyLoaded {
-                                            email_id: email_id_for_fetch,
-                                            epoch: body_epoch,
-                                            result,
-                                        },
-                                    }
-                                } else {
-                                    // Client not ready yet — signal deferral
-                                    Message::BodyDeferred {
-                                        email_id: email_id_for_fetch,
-                                        epoch: body_epoch,
-                                    }
+                                {
+                                    log::warn!("Failed to cache body: {}", e);
                                 }
-                            };
-
-                            match Abortable::new(load, abort_reg).await {
-                                Ok(message) => message,
-                                Err(_) => Message::Noop,
                             }
-                        })
-                    } else {
-                        // No-cache fallback: direct JMAP fetch
-                        let client = self.client_for_account(&account_id);
-                        if let Some(client) = client {
-                            self.status_message = "Loading message...".into();
-                            cosmic::task::future(async move {
-                                let load = async move {
-                                    Message::BodyLoaded {
-                                        email_id: email_id.clone(),
-                                        epoch: body_epoch,
-                                        result: neverlight_mail_core::email::get_body(
-                                            &client, &email_id,
-                                        )
-                                        .await
-                                        .map_err(|e| e.to_string()),
-                                    }
-                                };
-                                match Abortable::new(load, abort_reg).await {
-                                    Ok(message) => message,
-                                    Err(_) => Message::Noop,
-                                }
-                            })
-                        } else {
-                            // No cache, no client — defer until connected
-                            self.pending_body = Some(index);
-                            self.status_message = "Connecting...".into();
-                            Task::none()
+                            Message::BodyLoaded {
+                                email_id: email_id_for_fetch,
+                                epoch: body_epoch,
+                                result,
+                            }
+                        };
+
+                        match Abortable::new(load, abort_reg).await {
+                            Ok(message) => message,
+                            Err(_) => Message::Noop,
                         }
-                    }
+                    })
                 } else {
-                    Task::none()
+                    // No-cache fallback: direct JMAP fetch
+                    let Some(client) = self.client_for_account(&account_id) else {
+                        self.pending_body = Some(index);
+                        self.status_message = "Connecting...".into();
+                        return auto_read_task;
+                    };
+                    self.status_message = "Loading message...".into();
+                    cosmic::task::future(async move {
+                        let load = async move {
+                            Message::BodyLoaded {
+                                email_id: email_id.clone(),
+                                epoch: body_epoch,
+                                result: neverlight_mail_core::email::get_body(
+                                    &client, &email_id,
+                                )
+                                .await
+                                .map_err(|e| e.to_string()),
+                            }
+                        };
+                        match Abortable::new(load, abort_reg).await {
+                            Ok(message) => message,
+                            Err(_) => Message::Noop,
+                        }
+                    })
                 };
 
                 return cosmic::task::batch(vec![body_task, auto_read_task]);
