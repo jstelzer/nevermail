@@ -63,8 +63,16 @@ impl AppModel {
             }
             Message::Trash(index) => {
                 if let Some(intent) = self.trash_intent_for_index(index) {
+                    log::debug!(
+                        "Trash: index={} email_id={} source={} dest={}",
+                        index,
+                        intent.message.email_id,
+                        intent.source.mailbox_id,
+                        intent.dest.mailbox_id,
+                    );
                     return self.queue_or_start_move(intent);
                 }
+                log::debug!("Trash: trash_intent_for_index({}) returned None", index);
             }
             Message::Archive(index) => {
                 if let Some(intent) = self.archive_intent_for_index(index) {
@@ -217,12 +225,24 @@ impl AppModel {
                 result,
             } => {
                 if self.pending_move_epochs.get(&message).copied() != Some(epoch) {
+                    log::debug!(
+                        "MoveOpComplete dropped (stale): email_id={} epoch={} expected={:?}",
+                        message.email_id,
+                        epoch,
+                        self.pending_move_epochs.get(&message),
+                    );
                     self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
                     return Task::none();
                 }
                 self.pending_move_epochs.remove(&message);
                 match result {
                     Ok(()) => {
+                        log::debug!(
+                            "MoveOpComplete OK: email_id={} from={} epoch={}",
+                            message.email_id,
+                            source.mailbox_id,
+                            epoch,
+                        );
                         self.clear_error_surface();
                         let account_id = message.account_id.clone();
                         let email_id = message.email_id.clone();
@@ -255,6 +275,12 @@ impl AppModel {
                         }
                     }
                     Err(e) => {
+                        log::debug!(
+                            "MoveOpComplete FAILED: email_id={} from={} error={}",
+                            message.email_id,
+                            source.mailbox_id,
+                            e,
+                        );
                         if let Some((msg, original_index)) =
                             self.pending_move_restore.remove(&message)
                         {
@@ -436,6 +462,11 @@ impl AppModel {
     fn queue_or_start_move(&mut self, intent: PendingMoveIntent) -> Task<Message> {
         let account_id = intent.source.account_id.clone();
         if self.mutation_in_flight_accounts.contains(&account_id) {
+            log::debug!(
+                "Move queued: email_id={} (mutation in flight for {})",
+                intent.message.email_id,
+                account_id,
+            );
             self.pending_move_intents.insert(account_id, intent);
             self.status_message = "Move queued...".into();
             return Task::none();
@@ -446,12 +477,22 @@ impl AppModel {
     fn run_move_intent(&mut self, intent: PendingMoveIntent) -> Task<Message> {
         let source_account_id = intent.source.account_id.clone();
         if intent.source == intent.dest {
+            log::debug!(
+                "Move skipped (source==dest): email_id={} mailbox={}",
+                intent.message.email_id,
+                intent.source.mailbox_id,
+            );
             return self.try_run_next_move_intent_for(&source_account_id);
         }
         if self
             .client_for_account(&intent.source.account_id)
             .is_none()
         {
+            log::debug!(
+                "Move skipped (offline): email_id={} account={}",
+                intent.message.email_id,
+                intent.source.account_id,
+            );
             self.status_message = "Move failed: account is offline".into();
             return self.try_run_next_move_intent_for(&source_account_id);
         }
@@ -459,27 +500,54 @@ impl AppModel {
             m.email_id == intent.message.email_id
                 && m.mailbox_id == intent.source.mailbox_id
         }) else {
+            log::debug!(
+                "Move skipped (message not in list): email_id={} source_mailbox={} messages_count={} mailbox_ids={:?}",
+                intent.message.email_id,
+                intent.source.mailbox_id,
+                self.messages.len(),
+                self.messages.iter().take(5).map(|m| (m.email_id.as_str(), m.mailbox_id.as_str())).collect::<Vec<_>>(),
+            );
             return self.try_run_next_move_intent_for(&source_account_id);
         };
         if let Some(removed) = self.remove_message_optimistic(index) {
+            log::debug!(
+                "Move dispatching: email_id={} index={} from={} to={}",
+                intent.message.email_id,
+                index,
+                intent.source.mailbox_id,
+                intent.dest.mailbox_id,
+            );
             self.pending_move_restore
                 .insert(intent.message.clone(), (removed, index));
             return self.dispatch_move(intent.message, intent.source, intent.dest);
         }
+        log::debug!(
+            "Move skipped (remove_message_optimistic returned None): email_id={} index={}",
+            intent.message.email_id,
+            index,
+        );
         self.try_run_next_move_intent_for(&source_account_id)
     }
 
     fn trash_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
-        let msg = self.messages.get(index)?;
+        let Some(msg) = self.messages.get(index) else {
+            log::debug!("trash_intent: index {} out of range (len={})", index, self.messages.len());
+            return None;
+        };
         let account_id = msg.account_id.clone();
         let mailbox_id = msg.mailbox_id.clone();
         let email_id = msg.email_id.clone();
-        let acct = self
+        let Some(acct) = self
             .account_index(&account_id)
-            .and_then(|idx| self.accounts.get(idx))?;
+            .and_then(|idx| self.accounts.get(idx))
+        else {
+            log::debug!("trash_intent: account not found for {}", account_id);
+            return None;
+        };
         let Some(trash_id) =
             neverlight_mail_core::mailbox::find_by_role(&acct.folders, "trash")
         else {
+            log::debug!("trash_intent: no trash folder for account {}", account_id);
             self.status_message = "Trash folder not found".into();
             return None;
         };
@@ -594,6 +662,12 @@ impl AppModel {
         }
 
         if let Some(client) = self.client_for_account(&source.account_id) {
+            log::debug!(
+                "dispatch_move: JMAP move_to email_id={} from={} to={}",
+                message.email_id,
+                source.mailbox_id,
+                dest.mailbox_id,
+            );
             self.mutation_in_flight_accounts
                 .insert(source.account_id.clone());
             self.mutation_epoch = self.mutation_epoch.saturating_add(1);

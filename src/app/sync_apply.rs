@@ -112,14 +112,15 @@ impl AppModel {
         self.refresh_epoch = self.refresh_epoch.saturating_add(1);
         let epoch = self.refresh_epoch;
         tasks.push(cosmic::task::future(async move {
-            let result = neverlight_mail_core::mailbox::fetch_all(&client)
-                .await
-                .map_err(|e| e.to_string());
-            if let (Some(cache), Ok(ref folders)) = (&cache, &result) {
-                if let Err(e) = cache.save_folders(aid.clone(), folders.clone()).await {
-                    log::warn!("Failed to cache folders: {}", e);
-                }
-            }
+            let result = if let Some(ref cache) = cache {
+                neverlight_mail_core::sync::sync_mailboxes(&client, cache, &aid)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                neverlight_mail_core::mailbox::fetch_all(&client)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
             Message::SyncFoldersComplete {
                 account_id: aid,
                 epoch,
@@ -275,26 +276,29 @@ impl AppModel {
             self.message_abort = Some(abort_handle);
             let fetch_task = cosmic::task::future(async move {
                 let result = match Abortable::new(
-                    neverlight_mail_core::email::query_and_get(
-                        &client,
-                        &mid,
-                        DEFAULT_PAGE_SIZE,
-                        0,
-                    ),
+                    async {
+                        if let Some(ref cache) = cache {
+                            neverlight_mail_core::sync::sync_emails(
+                                &client, cache, &aid_for_cache, &mid, DEFAULT_PAGE_SIZE,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                        } else {
+                            neverlight_mail_core::email::query_and_get(
+                                &client, &mid, DEFAULT_PAGE_SIZE, 0,
+                            )
+                            .await
+                            .map(|(msgs, _)| msgs)
+                            .map_err(|e| e.to_string())
+                        }
+                    },
                     abort_reg,
                 )
                 .await
                 {
-                    Ok(result) => result.map(|(msgs, _query_result)| msgs).map_err(|e| e.to_string()),
+                    Ok(result) => result,
                     Err(_) => return Message::Noop,
                 };
-                if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
-                    if let Err(e) =
-                        cache.save_messages(aid_for_cache, mid.clone(), msgs.clone()).await
-                    {
-                        log::warn!("Failed to cache messages: {}", e);
-                    }
-                }
                 match result {
                     Ok(_) => Message::SyncMessagesComplete {
                         account_id: aid,
@@ -310,17 +314,53 @@ impl AppModel {
                     },
                 }
             });
-            if refresh_completed && had_pending {
-                let refresh_task = self.dispatch(Message::Refresh);
-                return cosmic::task::batch(vec![fetch_task, refresh_task]);
+            // Pre-cache Sent folder in the background so cross-mailbox
+            // threads (INBOX + Sent) link up immediately.
+            let sent_task = self.background_sync_sent(&account_id);
+
+            let mut tasks = vec![fetch_task];
+            if let Some(t) = sent_task {
+                tasks.push(t);
             }
-            return fetch_task;
+            if refresh_completed && had_pending {
+                tasks.push(self.dispatch(Message::Refresh));
+            }
+            return cosmic::task::batch(tasks);
         }
 
         if refresh_completed && had_pending {
             return self.dispatch(Message::Refresh);
         }
         Task::none()
+    }
+
+    /// Fire-and-forget sync of the Sent folder into cache.
+    /// Returns None if there's no client, cache, or sent folder.
+    fn background_sync_sent(&self, account_id: &str) -> Option<Task<Message>> {
+        let idx = self.account_index(account_id)?;
+        let acct = self.accounts.get(idx)?;
+        let client = acct.client.clone()?;
+        let cache = self.cache.clone()?;
+        let sent_id = neverlight_mail_core::mailbox::find_by_role(&acct.folders, "sent")?;
+
+        // Skip if this is already the selected folder (it'll be synced normally)
+        let selected_mailbox = self.selected_folder
+            .and_then(|fi| acct.folders.get(fi))
+            .map(|f| f.mailbox_id.as_str());
+        if selected_mailbox == Some(&sent_id) {
+            return None;
+        }
+
+        let aid = account_id.to_string();
+        log::debug!("Background sync: pre-caching Sent folder for {}", acct.config.label);
+        Some(cosmic::task::future(async move {
+            if let Err(e) = neverlight_mail_core::sync::sync_emails(
+                &client, &cache, &aid, &sent_id, DEFAULT_PAGE_SIZE,
+            ).await {
+                log::warn!("Background Sent sync failed: {}", e);
+            }
+            Message::Noop
+        }))
     }
 
     pub(super) fn handle_sync_folders_err(
@@ -596,7 +636,6 @@ impl AppModel {
             let aid2 = aid.clone();
             let aid_for_cache = aid2.clone();
             let mid = mailbox_id.clone();
-            let mid_for_cache = mid.clone();
             if let Some(acct_mut) = self.accounts.get_mut(acct_idx) {
                 acct_mut.conn_state = ConnectionState::Syncing;
             }
@@ -605,26 +644,29 @@ impl AppModel {
             self.message_abort = Some(abort_handle);
             tasks.push(cosmic::task::future(async move {
                 let result = match Abortable::new(
-                    neverlight_mail_core::email::query_and_get(
-                        &client,
-                        &mid,
-                        DEFAULT_PAGE_SIZE,
-                        0,
-                    ),
+                    async {
+                        if let Some(ref cache) = cache {
+                            neverlight_mail_core::sync::sync_emails(
+                                &client, cache, &aid_for_cache, &mid, DEFAULT_PAGE_SIZE,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                        } else {
+                            neverlight_mail_core::email::query_and_get(
+                                &client, &mid, DEFAULT_PAGE_SIZE, 0,
+                            )
+                            .await
+                            .map(|(msgs, _)| msgs)
+                            .map_err(|e| e.to_string())
+                        }
+                    },
                     abort_reg,
                 )
                 .await
                 {
-                    Ok(result) => result.map(|(msgs, _query_result)| msgs).map_err(|e| e.to_string()),
+                    Ok(result) => result,
                     Err(_) => return Message::Noop,
                 };
-                if let (Some(cache), Ok(ref msgs)) = (&cache, &result) {
-                    if let Err(e) =
-                        cache.save_messages(aid_for_cache, mid_for_cache, msgs.clone()).await
-                    {
-                        log::warn!("Failed to cache messages: {}", e);
-                    }
-                }
                 match result {
                     Ok(_) => Message::SyncMessagesComplete {
                         account_id: aid2,
@@ -727,14 +769,15 @@ impl AppModel {
                 let aid = acct.config.id.clone();
                 self.refresh_accounts_outstanding.insert(aid.clone());
                 tasks.push(cosmic::task::future(async move {
-                    let result = neverlight_mail_core::mailbox::fetch_all(&client)
-                        .await
-                        .map_err(|e| e.to_string());
-                    if let (Some(cache), Ok(ref folders)) = (&cache, &result) {
-                        if let Err(e) = cache.save_folders(aid.clone(), folders.clone()).await {
-                            log::warn!("Failed to cache folders: {}", e);
-                        }
-                    }
+                    let result = if let Some(ref cache) = cache {
+                        neverlight_mail_core::sync::sync_mailboxes(&client, cache, &aid)
+                            .await
+                            .map_err(|e| e.to_string())
+                    } else {
+                        neverlight_mail_core::mailbox::fetch_all(&client)
+                            .await
+                            .map_err(|e| e.to_string())
+                    };
                     Message::SyncFoldersComplete {
                         account_id: aid,
                         epoch: refresh_epoch,

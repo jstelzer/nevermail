@@ -522,8 +522,6 @@ impl AppModel {
                 if thread_msgs.len() <= 1 {
                     // Single message or empty — use normal single-message path
                     self.clear_conversation();
-                    let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                    self.body_abort = Some(abort_handle);
 
                     let account_id = thread_msgs
                         .first()
@@ -535,40 +533,15 @@ impl AppModel {
                         })
                         .unwrap_or_default();
 
-                    let cache = self.cache.clone();
-                    let client = self.client_for_account(&account_id);
-                    let eid = email_id.clone();
                     self.status_message = "Loading message...".into();
-                    return cosmic::task::future(async move {
-                        let load = async move {
-                            if let Some(cache) = cache {
-                                if let Ok(Some((md, plain, att))) =
-                                    cache.load_body(account_id.clone(), eid.clone()).await
-                                {
-                                    return Message::BodyLoaded {
-                                        email_id: eid,
-                                        epoch,
-                                        result: Ok((md, plain, att)),
-                                    };
-                                }
-                            }
-                            let Some(client) = client else {
-                                return Message::BodyDeferred { email_id: eid, epoch };
-                            };
-                            let result = neverlight_mail_core::email::get_body(&client, &eid)
-                                .await
-                                .map_err(|e| e.to_string());
-                            Message::BodyLoaded {
-                                email_id: eid,
-                                epoch,
-                                result,
-                            }
-                        };
-                        match Abortable::new(load, abort_reg).await {
-                            Ok(msg) => msg,
-                            Err(_) => Message::Noop,
-                        }
-                    });
+                    return body_fetch_task(
+                        self.cache.clone(),
+                        self.client_for_account(&account_id),
+                        account_id,
+                        email_id,
+                        epoch,
+                        None,
+                    );
                 }
 
                 // --- Multi-message conversation ---
