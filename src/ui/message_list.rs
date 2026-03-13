@@ -101,7 +101,7 @@ pub fn view<'a>(state: MessageListState<'a>) -> Element<'a, Message> {
             }
 
             let email_id = msg.email_id.clone();
-            let mailbox_id = msg.mailbox_id.clone();
+            let mailbox_id = msg.context_mailbox_id.clone();
             let source_account_id = msg.account_id.clone();
             let source = widget::dnd_source::<Message, DraggedMessage>(btn)
                 .drag_content(move || DraggedMessage {

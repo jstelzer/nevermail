@@ -242,7 +242,7 @@ impl AppModel {
         let unread = self
             .messages
             .iter()
-            .filter(|m| m.mailbox_id == mailbox_id && !m.is_read)
+            .filter(|m| m.context_mailbox_id == mailbox_id && !m.is_read)
             .count() as u32;
         if let Some(idx) = self.account_index(account_id) {
             if let Some(folder) = self.accounts[idx]
@@ -334,6 +334,7 @@ impl AppModel {
                 auth: AuthBackend::Keyring,
                 email_addresses: a.config.email_addresses.clone(),
                 capabilities: a.config.capabilities.clone(),
+                max_messages_per_mailbox: a.config.max_messages_per_mailbox,
             })
             .collect();
 

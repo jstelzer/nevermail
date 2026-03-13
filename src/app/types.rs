@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use cosmic::app::Core;
@@ -201,6 +203,12 @@ pub struct AccountState {
     pub reconnect_attempts: u32,
     /// Last error message for diagnostics display.
     pub last_error: Option<String>,
+    /// Per-mailbox backfill progress: mailbox_id → (position, total).
+    pub backfill_progress: HashMap<String, (u32, u32)>,
+    /// Whether backfill subscription is active for this account.
+    pub backfill_active: bool,
+    /// Pause flag: set during head sync to avoid contention.
+    pub backfill_pause: Arc<AtomicBool>,
 }
 
 impl AccountState {
@@ -214,6 +222,9 @@ impl AccountState {
             collapsed: false,
             reconnect_attempts: 0,
             last_error: None,
+            backfill_progress: HashMap::new(),
+            backfill_active: false,
+            backfill_pause: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -506,6 +517,20 @@ pub enum Message {
 
     /// Auto-mark-read: fires 5s after a message is displayed
     AutoMarkRead(String),
+
+    // Backfill progress from background history walking
+    BackfillProgress {
+        account_id: AccountId,
+        mailbox_id: String,
+        position: u32,
+        total: u32,
+        completed: bool,
+    },
+    BackfillComplete(AccountId),
+    BackfillTrigger {
+        account_id: AccountId,
+        mailbox_id: String,
+    },
 
     ForceReconnect(AccountId),
     Refresh,

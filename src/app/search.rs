@@ -34,6 +34,7 @@ impl AppModel {
                 }
                 if let Some(cache) = &self.cache {
                     let cache = cache.clone();
+                    let account_id = self.active_account_id();
                     self.search_epoch = self.search_epoch.saturating_add(1);
                     let epoch = self.search_epoch;
                     self.status_message = "Searching...".into();
@@ -44,7 +45,7 @@ impl AppModel {
                     let (abort_handle, abort_reg) = AbortHandle::new_pair();
                     self.search_abort = Some(abort_handle);
                     return cosmic::task::future(async move {
-                        match Abortable::new(cache.search(query.clone()), abort_reg).await {
+                        match Abortable::new(cache.search(account_id, query.clone()), abort_reg).await {
                             Ok(result) => Message::SearchResultsLoaded {
                                 query,
                                 epoch,

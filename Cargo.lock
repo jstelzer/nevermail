@@ -3740,6 +3740,7 @@ dependencies = [
  "libcosmic",
  "log",
  "neverlight-mail-core",
+ "neverlight-mail-oauth",
  "notify-rust",
  "serde",
  "serde_json",
@@ -3751,22 +3752,36 @@ dependencies = [
 name = "neverlight-mail-core"
 version = "0.1.0"
 dependencies = [
- "base64",
  "dirs",
  "html-safe-md",
  "keyring",
  "log",
  "mail-parser",
+ "neverlight-mail-oauth",
+ "open",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "neverlight-mail-oauth"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "log",
  "open",
  "rand 0.9.2",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
- "uuid",
 ]
 
 [[package]]

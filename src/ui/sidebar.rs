@@ -136,6 +136,8 @@ pub fn view<'a>(
 
                         let ai = acct_idx;
                         let fi = folder_idx;
+                        let mut folder_col = widget::column().spacing(0);
+
                         let mut btn = widget::button::text(label)
                             .on_press(Message::SelectFolder(ai, fi))
                             .width(Length::Fill);
@@ -170,7 +172,32 @@ pub fn view<'a>(
                         .on_enter(move |_x, _y, _mimes| Message::FolderDragEnter(global_idx))
                         .on_leave(|| Message::FolderDragLeave);
 
-                        col = col.push(dest);
+                        folder_col = folder_col.push(dest);
+
+                        // Backfill progress indicator or sync trigger
+                        if let Some(&(position, total)) =
+                            acct.backfill_progress.get(&folder.mailbox_id)
+                        {
+                            let progress_label =
+                                format!("    \u{25CC} syncing {}/{}", format_count(position), format_count(total));
+                            folder_col = folder_col.push(widget::text::caption(progress_label));
+                        } else if acct.backfill_active && acct.client.is_some() {
+                            let trigger_aid = acct.config.id.clone();
+                            let trigger_mid = folder.mailbox_id.clone();
+                            folder_col = folder_col.push(
+                                widget::button::custom(
+                                    widget::text::caption("    \u{21BB} Sync full history"),
+                                )
+                                .on_press(Message::BackfillTrigger {
+                                    account_id: trigger_aid,
+                                    mailbox_id: trigger_mid,
+                                })
+                                .class(cosmic::theme::Button::Text)
+                                .width(Length::Fill),
+                            );
+                        }
+
+                        col = col.push(folder_col);
                     }
                 }
             }
@@ -377,6 +404,14 @@ fn diagnostics_view<'a>(state: DiagnosticsState<'a>) -> Element<'a, Message> {
         .width(Length::Fill)
         .class(cosmic::style::Container::Card)
         .into()
+}
+
+fn format_count(n: u32) -> String {
+    if n >= 1_000 {
+        format!("{},{:03}", n / 1_000, n % 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

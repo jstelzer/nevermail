@@ -15,7 +15,9 @@ impl AppModel {
         account_id: String,
         folders: Vec<Folder>,
     ) -> Task<Message> {
+        log::debug!("handle_cached_folders_ok: account={} folders={}", account_id, folders.len());
         if folders.is_empty() {
+            log::debug!("handle_cached_folders_ok: no cached folders, skipping");
             return Task::none();
         }
         let Some(idx) = self.account_index(&account_id) else {
@@ -79,7 +81,9 @@ impl AppModel {
         account_id: String,
         client: neverlight_mail_core::client::JmapClient,
     ) -> Task<Message> {
+        log::info!("handle_account_connected_ok: account={}", account_id);
         let Some(idx) = self.account_index(&account_id) else {
+            log::warn!("handle_account_connected_ok: account {} not found in accounts list", account_id);
             return Task::none();
         };
         self.accounts[idx].client = Some(client.clone());
@@ -195,6 +199,7 @@ impl AppModel {
         epoch: u64,
         folders: Vec<Folder>,
     ) -> Task<Message> {
+        log::debug!("handle_sync_folders_ok: account={} epoch={} folders={}", account_id, epoch, folders.len());
         if epoch != self.refresh_epoch {
             self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
             return Task::none();
@@ -208,8 +213,7 @@ impl AppModel {
             )
         {
             had_pending = self.refresh_phase.take_pending();
-            self.refresh_phase = RefreshPhase::Idle;
-            self.refresh_started_at = None;
+            self.finish_refresh();
             self.phase = Phase::Idle;
             refresh_completed = true;
         }
@@ -222,6 +226,10 @@ impl AppModel {
         self.accounts[idx].folders = folders;
         self.accounts[idx].rebuild_folder_map();
         self.accounts[idx].conn_state = ConnectionState::Connected;
+        // Activate backfill if not already running
+        if !self.accounts[idx].backfill_active && self.accounts[idx].client.is_some() {
+            self.accounts[idx].backfill_active = true;
+        }
         self.clear_error_surface();
         self.last_refresh_at = Some(Instant::now());
         self.status_message = format!(
@@ -369,6 +377,7 @@ impl AppModel {
         epoch: u64,
         e: String,
     ) -> Task<Message> {
+        log::error!("handle_sync_folders_err: account={} epoch={} error={}", account_id, epoch, e);
         if epoch != self.refresh_epoch {
             self.stale_apply_drop_count = self.stale_apply_drop_count.saturating_add(1);
             return Task::none();
@@ -406,8 +415,7 @@ impl AppModel {
                 )
             {
                 let had_pending = self.refresh_phase.take_pending();
-                self.refresh_phase = RefreshPhase::Idle;
-                self.refresh_started_at = None;
+                self.finish_refresh();
                 if had_pending {
                     tasks.push(self.dispatch(Message::Refresh));
                 }
@@ -747,8 +755,7 @@ impl AppModel {
                 self.refresh_phase.mark_timeout_reported();
                 self.refresh_timeout_count = self.refresh_timeout_count.saturating_add(1);
                 self.refresh_stuck_count = self.refresh_stuck_count.saturating_add(1);
-                self.refresh_phase = RefreshPhase::Idle;
-                self.refresh_started_at = None;
+                self.finish_refresh();
                 self.refresh_accounts_outstanding.clear();
                 self.refresh_epoch = self.refresh_epoch.saturating_add(1);
                 log::warn!("Refresh stuck ({}s timeout), force-clearing and restarting", REFRESH_STUCK_TIMEOUT.as_secs());
@@ -787,6 +794,10 @@ impl AppModel {
             }
         }
         if !tasks.is_empty() {
+            // Pause backfill during head sync to avoid contention
+            for acct in &self.accounts {
+                acct.backfill_pause.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.refresh_phase = RefreshPhase::InFlight { pending: false, timeout_reported: false };
             self.refresh_started_at = Some(Instant::now());
             self.phase = Phase::Refreshing;
@@ -794,8 +805,7 @@ impl AppModel {
             self.status_message = "Refreshing...".into();
             return cosmic::task::batch(tasks);
         }
-        self.refresh_started_at = None;
-        self.refresh_phase = RefreshPhase::Idle;
+        self.finish_refresh();
         self.phase = Phase::Idle;
         Task::none()
     }

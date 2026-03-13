@@ -8,6 +8,7 @@ description = "A COSMIC desktop email client"
 [dependencies]
 # Core email engine (JMAP-native)
 neverlight-mail-core = { path = "../neverlight-mail-core" }
+neverlight-mail-oauth = { path = "../neverlight-mail-oauth" }
 
 # COSMIC UI framework
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [

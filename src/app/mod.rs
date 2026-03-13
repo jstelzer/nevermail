@@ -1,5 +1,6 @@
 mod accounts;
 mod actions;
+mod backfill;
 mod body;
 mod compose;
 mod layout;
@@ -373,6 +374,29 @@ impl cosmic::Application for AppModel {
             }
         }
 
+        // Per-account backfill streams
+        for (i, acct) in self.accounts.iter().enumerate() {
+            if acct.backfill_active {
+                if let (Some(client), Some(cache)) = (&acct.client, &self.cache) {
+                    let mailbox_ids: Vec<String> =
+                        acct.folders.iter().map(|f| f.mailbox_id.clone()).collect();
+                    if !mailbox_ids.is_empty() {
+                        subs.push(Subscription::run_with_id(
+                            format!("backfill-{}", i),
+                            backfill::backfill_stream(
+                                client.clone(),
+                                cache.clone(),
+                                acct.config.id.clone(),
+                                mailbox_ids,
+                                acct.config.max_messages_per_mailbox,
+                                acct.backfill_pause.clone(),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         // Periodic full sync fallback (5 minutes)
         let has_any_client = self.accounts.iter().any(|a| a.client.is_some());
         if has_any_client {
@@ -579,6 +603,11 @@ impl cosmic::Application for AppModel {
             | Message::PushError(_, _)
             | Message::PushEnded(_) => self.handle_watch(message),
 
+            // Backfill progress
+            Message::BackfillProgress { .. }
+            | Message::BackfillComplete(_)
+            | Message::BackfillTrigger { .. } => self.handle_backfill(message),
+
             // Pane layout
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
                 self.panes.resize(split, ratio);
@@ -597,6 +626,15 @@ impl cosmic::Application for AppModel {
 impl AppModel {
     pub(super) fn clear_error_surface(&mut self) {
         self.error_surface = None;
+    }
+
+    /// Transition refresh to idle and unpause backfill.
+    pub(super) fn finish_refresh(&mut self) {
+        self.refresh_phase = RefreshPhase::Idle;
+        self.refresh_started_at = None;
+        for acct in &self.accounts {
+            acct.backfill_pause.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub(super) fn set_status_error(&mut self, message: String) {

@@ -36,7 +36,7 @@ impl AppModel {
                     return self.queue_or_start_flag(PendingFlagIntent {
                         message: MessageIdentity {
                             account_id: msg.account_id.clone(),
-                            mailbox_id: msg.mailbox_id.clone(),
+                            mailbox_id: msg.context_mailbox_id.clone(),
                             email_id: msg.email_id.clone(),
                         },
                         kind: FlagIntentKind::ToggleRead,
@@ -48,7 +48,7 @@ impl AppModel {
                     return self.queue_or_start_flag(PendingFlagIntent {
                         message: MessageIdentity {
                             account_id: msg.account_id.clone(),
-                            mailbox_id: msg.mailbox_id.clone(),
+                            mailbox_id: msg.context_mailbox_id.clone(),
                             email_id: msg.email_id.clone(),
                         },
                         kind: FlagIntentKind::ToggleStar,
@@ -173,7 +173,7 @@ impl AppModel {
                             .iter_mut()
                             .find(|m| {
                                 m.email_id == message.email_id
-                                    && m.mailbox_id == message.mailbox_id
+                                    && m.context_mailbox_id == message.mailbox_id
                             })
                         {
                             let (is_read, is_starred) = store::flags_from_u8(prev_flags);
@@ -353,7 +353,7 @@ impl AppModel {
             .iter()
             .position(|m| {
                 m.email_id == message_id.email_id
-                    && m.mailbox_id == message_id.mailbox_id
+                    && m.context_mailbox_id == message_id.mailbox_id
             })
         else {
             return self.try_run_next_flag_intent_for(&message_id.account_id);
@@ -498,14 +498,14 @@ impl AppModel {
         }
         let Some(index) = self.messages.iter().position(|m| {
             m.email_id == intent.message.email_id
-                && m.mailbox_id == intent.source.mailbox_id
+                && m.context_mailbox_id == intent.source.mailbox_id
         }) else {
             log::debug!(
                 "Move skipped (message not in list): email_id={} source_mailbox={} messages_count={} mailbox_ids={:?}",
                 intent.message.email_id,
                 intent.source.mailbox_id,
                 self.messages.len(),
-                self.messages.iter().take(5).map(|m| (m.email_id.as_str(), m.mailbox_id.as_str())).collect::<Vec<_>>(),
+                self.messages.iter().take(5).map(|m| (m.email_id.as_str(), m.context_mailbox_id.as_str())).collect::<Vec<_>>(),
             );
             return self.try_run_next_move_intent_for(&source_account_id);
         };
@@ -535,7 +535,7 @@ impl AppModel {
             return None;
         };
         let account_id = msg.account_id.clone();
-        let mailbox_id = msg.mailbox_id.clone();
+        let mailbox_id = msg.context_mailbox_id.clone();
         let email_id = msg.email_id.clone();
         let Some(acct) = self
             .account_index(&account_id)
@@ -571,7 +571,7 @@ impl AppModel {
     fn archive_intent_for_index(&mut self, index: usize) -> Option<PendingMoveIntent> {
         let msg = self.messages.get(index)?;
         let account_id = msg.account_id.clone();
-        let mailbox_id = msg.mailbox_id.clone();
+        let mailbox_id = msg.context_mailbox_id.clone();
         let email_id = msg.email_id.clone();
         let acct = self
             .account_index(&account_id)

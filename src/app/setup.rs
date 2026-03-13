@@ -6,7 +6,7 @@ use neverlight_mail_core::config::{
     AccountCapabilities, AccountConfig, AuthBackend, AuthMethod, FileAccountConfig,
     MultiAccountFileConfig, new_account_id, DEFAULT_JMAP_SESSION_URL,
 };
-use neverlight_mail_core::oauth::OAuthRedirectHandler;
+use neverlight_mail_oauth::{AppInfo, OAuthRedirectHandler};
 use neverlight_mail_core::setup::{self, FieldId, SetupInput, SetupRequest};
 
 use super::{AccountState, AppModel, ConnectionState, Message, OAuthSetupPhase, OAuthTokenResult};
@@ -126,6 +126,7 @@ impl AppModel {
             auth: token_backend,
             email_addresses: email_addresses.clone(),
             capabilities: AccountCapabilities::default(),
+            max_messages_per_mailbox: None,
         };
 
         let mut multi = MultiAccountFileConfig::load()
@@ -152,6 +153,7 @@ impl AppModel {
             auth: AuthMethod::AppPassword { token },
             email_addresses,
             capabilities: AccountCapabilities::default(),
+            max_messages_per_mailbox: None,
         };
 
         self.finalize_setup(account_id, label, account_config)
@@ -174,15 +176,22 @@ impl AppModel {
             let result: Result<OAuthTokenResult, String> = async {
                 // Bind redirect listener first (OS-assigned port)
                 let redirect =
-                    neverlight_mail_core::oauth::LocalServerRedirect::bind().await
+                    neverlight_mail_oauth::LocalServerRedirect::bind("Neverlight Mail").await
                         .map_err(|e| e.to_string())?;
 
-                let redirect_uri = redirect.redirect_uri();
+                let app_info = AppInfo {
+                    client_name: "Neverlight Mail".into(),
+                    client_uri: "https://github.com/jstelzer/neverlight-mail".into(),
+                    software_id: "com.neverlight.email".into(),
+                    software_version: env!("CARGO_PKG_VERSION").into(),
+                    redirect_uri: redirect.redirect_uri(),
+                };
 
                 // Discover + register
-                let flow = neverlight_mail_core::oauth::OAuthFlow::discover_and_register(
+                let flow = neverlight_mail_oauth::OAuthFlow::discover_and_register(
                     &jmap_url,
-                    &redirect_uri,
+                    &app_info,
+                    "urn:ietf:params:oauth:scope:mail",
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -266,6 +275,7 @@ impl AppModel {
             },
             email_addresses: email_addresses.clone(),
             capabilities: AccountCapabilities::default(),
+            max_messages_per_mailbox: None,
         };
 
         let mut multi = MultiAccountFileConfig::load()
@@ -301,6 +311,7 @@ impl AppModel {
             },
             email_addresses,
             capabilities: AccountCapabilities::default(),
+            max_messages_per_mailbox: None,
         };
 
         self.oauth_phase = OAuthSetupPhase::Inactive;
