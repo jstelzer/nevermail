@@ -132,6 +132,7 @@ impl cosmic::Application for AppModel {
             refresh_phase: RefreshPhase::Idle,
             refresh_accounts_outstanding: HashSet::new(),
             refresh_started_at: None,
+            refresh_pending_after_sync: false,
             mutation_in_flight_accounts: HashSet::new(),
             flag_in_flight_accounts: HashSet::new(),
             pending_move_intents: HashMap::new(),

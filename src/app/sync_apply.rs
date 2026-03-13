@@ -340,8 +340,12 @@ impl AppModel {
             if let Some(t) = sent_task {
                 tasks.push(t);
             }
+            // Defer the pending refresh until after the message sync completes.
+            // Dispatching it here would race: the second refresh's SyncFoldersComplete
+            // bumps message_epoch and aborts the sync_emails we just started, causing
+            // the first SyncMessagesComplete to be dropped as stale.
             if refresh_completed && had_pending {
-                tasks.push(self.dispatch(Message::Refresh));
+                self.refresh_pending_after_sync = true;
             }
             return cosmic::task::batch(tasks);
         }
@@ -526,6 +530,12 @@ impl AppModel {
             tasks.push(self.dispatch(Message::ViewBody(index)));
         }
 
+        // Dispatch the deferred pending refresh now that the message sync is done.
+        if self.refresh_pending_after_sync {
+            self.refresh_pending_after_sync = false;
+            tasks.push(self.dispatch(Message::Refresh));
+        }
+
         if tasks.is_empty() {
             self.status_message =
                 format!("{} messages (synced)", self.messages.len());
@@ -549,6 +559,8 @@ impl AppModel {
             return Task::none();
         }
         self.message_abort = None;
+        // Clear deferred pending refresh — reconnect will start a fresh sync.
+        self.refresh_pending_after_sync = false;
         if let Some(idx) = self.account_index(account_id) {
             let acct = &mut self.accounts[idx];
             acct.conn_state = ConnectionState::Error(e.to_string());

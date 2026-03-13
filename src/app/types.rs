@@ -313,6 +313,10 @@ pub struct AppModel {
     pub(super) refresh_phase: RefreshPhase,
     pub(super) refresh_accounts_outstanding: HashSet<AccountId>,
     pub(super) refresh_started_at: Option<Instant>,
+    /// Deferred pending refresh: set when a coalesced refresh completes while
+    /// a message sync is about to start. The pending refresh is dispatched
+    /// after the message sync finishes to avoid epoch races.
+    pub(super) refresh_pending_after_sync: bool,
     pub(super) mutation_in_flight_accounts: HashSet<AccountId>,
     pub(super) flag_in_flight_accounts: HashSet<AccountId>,
     pub(super) pending_move_intents: HashMap<AccountId, PendingMoveIntent>,
