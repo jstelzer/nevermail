@@ -162,9 +162,19 @@ impl AppModel {
         let label = &self.accounts[idx].config.label;
 
         if !has_folders && self.setup_model.is_none() && self.accounts.len() == 1 {
-            let mut model = neverlight_mail_core::setup::SetupModel::from_config_needs(
-                &neverlight_mail_core::config::ConfigNeedsInput::FullSetup,
-            );
+            let needs = if neverlight_mail_core::setup::is_oauth_reauth_error(&e) {
+                let cfg = &self.accounts[idx].config;
+                neverlight_mail_core::config::ConfigNeedsInput::OAuthReauth {
+                    account_id: cfg.id.clone(),
+                    label: cfg.label.clone(),
+                    jmap_url: cfg.jmap_url.clone(),
+                    username: cfg.username.clone(),
+                    error: e.clone(),
+                }
+            } else {
+                neverlight_mail_core::config::ConfigNeedsInput::FullSetup
+            };
+            let mut model = neverlight_mail_core::setup::SetupModel::from_config_needs(&needs);
             model.error = Some(format!("Connection failed: {e}"));
             self.setup_model = Some(model);
         }

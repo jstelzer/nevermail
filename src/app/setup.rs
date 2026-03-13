@@ -103,8 +103,9 @@ impl AppModel {
             .collect();
 
         let account_id = match &self.setup().request {
-            SetupRequest::Edit { account_id } => account_id.clone(),
-            SetupRequest::TokenOnly { account_id, .. } => account_id.clone(),
+            SetupRequest::Edit { account_id }
+            | SetupRequest::TokenOnly { account_id, .. }
+            | SetupRequest::Reauth { account_id, .. } => account_id.clone(),
             SetupRequest::Full => new_account_id(),
         };
 
@@ -246,8 +247,9 @@ impl AppModel {
             .collect();
 
         let account_id = match &self.setup().request {
-            SetupRequest::Edit { account_id } => account_id.clone(),
-            SetupRequest::TokenOnly { account_id, .. } => account_id.clone(),
+            SetupRequest::Edit { account_id }
+            | SetupRequest::TokenOnly { account_id, .. }
+            | SetupRequest::Reauth { account_id, .. } => account_id.clone(),
             SetupRequest::Full => new_account_id(),
         };
 
@@ -261,6 +263,23 @@ impl AppModel {
                 }
             };
 
+        // For reauth, preserve existing config fields (capabilities, emails, etc.)
+        let mut multi = MultiAccountFileConfig::load()
+            .ok()
+            .flatten()
+            .unwrap_or(MultiAccountFileConfig { accounts: Vec::new() });
+
+        let existing = multi.accounts.iter().find(|a| a.id == account_id);
+        let (caps, max_msgs, emails_resolved) = if let Some(ex) = existing {
+            (
+                ex.capabilities.clone(),
+                ex.max_messages_per_mailbox,
+                if email_addresses.is_empty() { ex.email_addresses.clone() } else { email_addresses.clone() },
+            )
+        } else {
+            (AccountCapabilities::default(), None, email_addresses.clone())
+        };
+
         let fac = FileAccountConfig {
             id: account_id.clone(),
             label: label.clone(),
@@ -273,15 +292,10 @@ impl AppModel {
                 token_endpoint: tokens.token_endpoint.clone(),
                 refresh_token_plaintext,
             },
-            email_addresses: email_addresses.clone(),
-            capabilities: AccountCapabilities::default(),
-            max_messages_per_mailbox: None,
+            email_addresses: emails_resolved,
+            capabilities: caps,
+            max_messages_per_mailbox: max_msgs,
         };
-
-        let mut multi = MultiAccountFileConfig::load()
-            .ok()
-            .flatten()
-            .unwrap_or(MultiAccountFileConfig { accounts: Vec::new() });
 
         if let Some(pos) = multi.accounts.iter().position(|a| a.id == account_id) {
             multi.accounts[pos] = fac;
@@ -350,8 +364,34 @@ impl AppModel {
 
         let title = model.title();
         let is_token_only = matches!(model.request, SetupRequest::TokenOnly { .. });
+        let is_reauth = model.is_reauth();
 
-        if !is_token_only {
+        if is_reauth {
+            // Reauth: show read-only account info + prominent OAuth button
+            controls = controls.push(
+                widget::text::body(format!("Account: {}", model.label)),
+            );
+            controls = controls.push(
+                widget::text::body(format!("Server: {}", model.jmap_url)),
+            );
+            controls = controls.push(
+                widget::text::body(format!("Username: {}", model.username)),
+            );
+            controls = controls.push(widget::text::caption(
+                "Your authorization has expired. Sign in again to reconnect.",
+            ));
+
+            let oauth_label = match self.oauth_phase {
+                OAuthSetupPhase::Inactive => "Re-authorize with browser",
+                OAuthSetupPhase::Discovering => "Signing in...",
+            };
+            let oauth_enabled = self.oauth_phase == OAuthSetupPhase::Inactive;
+            let mut oauth_btn = widget::button::suggested(oauth_label);
+            if oauth_enabled {
+                oauth_btn = oauth_btn.on_press(Message::SetupOAuthStart);
+            }
+            controls = controls.push(oauth_btn);
+        } else if !is_token_only {
             controls = controls.push(
                 widget::text_input("Account name (e.g. Work)", &model.label)
                     .label("Label")
@@ -388,18 +428,20 @@ impl AppModel {
             );
         }
 
-        controls = controls.push(
-            widget::text_input::secure_input(
-                "API token / app password",
-                &model.token,
-                Some(Message::SetupPasswordVisibilityToggled),
-                !self.setup_password_visible,
-            )
-            .label("Token")
-            .on_input(Message::SetupTokenChanged),
-        );
+        if !is_reauth {
+            controls = controls.push(
+                widget::text_input::secure_input(
+                    "API token / app password",
+                    &model.token,
+                    Some(Message::SetupPasswordVisibilityToggled),
+                    !self.setup_password_visible,
+                )
+                .label("Token")
+                .on_input(Message::SetupTokenChanged),
+            );
+        }
 
-        if !is_token_only {
+        if !is_token_only && !is_reauth {
             controls = controls.push(
                 widget::text_input("you@example.com, alias@example.com", &model.email)
                     .label("Email addresses (comma-separated)")
@@ -421,13 +463,16 @@ impl AppModel {
 
         let mut dialog = widget::dialog()
             .title(title)
-            .control(controls)
-            .primary_action(
+            .control(controls);
+
+        if !is_reauth {
+            dialog = dialog.primary_action(
                 widget::button::suggested("Connect").on_press(Message::SetupSubmit),
-            )
-            .secondary_action(
-                widget::button::standard("Cancel").on_press(Message::SetupCancel),
             );
+        }
+        dialog = dialog.secondary_action(
+            widget::button::standard("Cancel").on_press(Message::SetupCancel),
+        );
 
         if let Some(err) = error_text {
             dialog = dialog.body(err);

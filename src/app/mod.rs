@@ -217,6 +217,7 @@ impl cosmic::Application for AppModel {
                 let status = match needs {
                     ConfigNeedsInput::FullSetup => "Setup required — enter your account details",
                     ConfigNeedsInput::TokenOnly { .. } => "API token required",
+                    ConfigNeedsInput::OAuthReauth { .. } => "Authorization expired — re-authorize to reconnect",
                 };
                 app.setup_model = Some(SetupModel::from_config_needs(needs));
                 app.status_message = status.into();
