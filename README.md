@@ -37,6 +37,7 @@ Built for users who prefer native, privacy-respecting desktop software over webm
 | UI          | [libcosmic](https://github.com/pop-os/libcosmic)                           | COSMIC desktop toolkit (iced fork)                |
 | Mail engine | [neverlight-mail-core](../neverlight-mail-core)                            | JMAP client, MIME parsing, cache                  |
 | OAuth       | [neverlight-mail-oauth](https://github.com/jstelzer/neverlight-mail-oauth) | OAuth 2.0 (RFC draft-ietf-mailmaint-oauth-public) |
+| HTML render | [html-safe-md](../html-safe-md)                                            | Sanitize + convert HTML → markdown                |
 | Sending     | JMAP `EmailSubmission/set`                                                 | Outbound mail via JMAP (no SMTP)                  |
 | Push        | JMAP EventSource (SSE)                                                     | Real-time notifications (no IMAP IDLE)            |
 | Cache       | [rusqlite](https://crates.io/crates/rusqlite)                              | Local SQLite message cache + FTS5                 |
